@@ -11,7 +11,7 @@ import crypto from 'crypto';
 const rateLimitStore = new Map();
 
 const RATE_LIMIT_MAX    = 30;     // max requests per window
-const RATE_LIMIT_WINDOW = 10 * 60 * 1000; // 10 minutes in ms
+const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in ms
 const TIMESTAMP_TTL     = 5 * 60 * 1000;  // request expires after 5 minutes
 const MAX_BODY_BYTES    = 5 * 1024;        // 5KB max payload
 
