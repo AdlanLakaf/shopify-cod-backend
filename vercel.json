@@ -1,3 +1,14 @@
 {
   "version": 2,
+  "functions": {
+    "api/create-order.js": {
+      "runtime": "nodejs24.x"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/create-order",
+      "dest": "/api/create-order.js"
+    }
+  ]
 }
