@@ -1,10 +1,19 @@
-// api/get-stopdesks.js
+// ============================================================
+//  ZR Express — Fetch Stopdesks
+//  GET /api/get-stopdesks
+//  Security: rate limiting + origin check (no HMAC — GET request)
+// ============================================================
+
+import { runSecurityChecks } from './_security.js';
+
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+  // skipHmac=true because GET requests don't have a body to sign
+  const blocked = runSecurityChecks(req, res, { skipHmac: true });
+  if (blocked) return;
+
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
 
   const TENANT  = process.env.ZR_TENANT;
   const API_KEY = process.env.ZR_API_KEY;
@@ -24,8 +33,11 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         pageNumber: 1,
-        pageSize:   1000
-        // no filter — return all hubs
+        pageSize:   100,
+        advancedFilter: {
+          logic: 'AND',
+          filters: [{ field: 'type', operator: 'equals', value: 'stopdesk' }]
+        }
       })
     });
 
@@ -36,12 +48,10 @@ export default async function handler(req, res) {
     }
 
     const data = await zrRes.json();
-    console.log('ZR total hubs:', data.totalCount);
 
     const stopdesks = (data.items || []).map(hub => ({
       id:           hub.id,
       name:         hub.name,
-      type:         hub.type,
       city:         hub.address?.city     || '',
       district:     hub.address?.district || '',
       street:       hub.address?.street   || '',
@@ -49,11 +59,12 @@ export default async function handler(req, res) {
       phone:        hub.phone?.number1    || ''
     }));
 
+    // Cache 10 minutes on Vercel edge
     res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate');
     return res.status(200).json({ stopdesks });
 
   } catch (err) {
-    console.error('Network error:', err);
+    console.error('Network error fetching stopdesks:', err);
     return res.status(500).json({ error: 'Network error' });
   }
 }
