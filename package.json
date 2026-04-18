@@ -1,0 +1,9 @@
+{
+  "name": "shopify-cod-backend",
+  "version": "1.0.0",
+  "description": "Shopify COD order creation backend for Algerian stores",
+  "private": true,
+  "engines": {
+    "node": "18.x"
+  }
+}
