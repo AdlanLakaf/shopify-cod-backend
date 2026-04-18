@@ -10,27 +10,32 @@ import crypto from 'crypto';
 // Key: IP address  Value: { count, windowStart }
 const rateLimitStore = new Map();
 
-const RATE_LIMIT_MAX    = 5;      // max requests per window
+const RATE_LIMIT_MAX    = 30;     // max requests per window
 const RATE_LIMIT_WINDOW = 10 * 60 * 1000; // 10 minutes in ms
 const TIMESTAMP_TTL     = 5 * 60 * 1000;  // request expires after 5 minutes
 const MAX_BODY_BYTES    = 5 * 1024;        // 5KB max payload
 
 // ── 1. CORS — restrict to your Shopify store only ──
 export function setCorsHeaders(req, res) {
-  const SHOP_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
+  const SHOP_DOMAIN        = process.env.SHOPIFY_STORE_DOMAIN;   // e.g. handsnose.com
+  const SHOP_MYSHOPIFY     = process.env.SHOPIFY_MYSHOPIFY_DOMAIN; // e.g. handsnose.myshopify.com
+  const origin             = req.headers.origin || '';
+
+  // All domains that are allowed to call this API
   const allowedOrigins = [
-    `https://${SHOP_DOMAIN}`,
-    // also allow the myshopify.com domain in case theme preview uses it
-    `https://${SHOP_DOMAIN?.replace('.myshopify.com', '')}.myshopify.com`
+    SHOP_DOMAIN        ? `https://${SHOP_DOMAIN}`    : null,  // custom domain
+    SHOP_MYSHOPIFY     ? `https://${SHOP_MYSHOPIFY}` : null,  // myshopify domain
   ].filter(Boolean);
 
-  const origin = req.headers.origin || '';
-  if (allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else {
-    // During development you can temporarily allow all — remove in production
-    res.setHeader('Access-Control-Allow-Origin', `https://${SHOP_DOMAIN}`);
-  }
+  // Also allow any *.myshopify.com for theme preview URLs
+  const isAllowed = allowedOrigins.includes(origin) ||
+    origin.endsWith('.myshopify.com') ||
+    origin.includes('shopify.com');
+
+  res.setHeader(
+    'Access-Control-Allow-Origin',
+    isAllowed ? origin : (allowedOrigins[0] || '*')
+  );
 
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Timestamp, X-Signature');
