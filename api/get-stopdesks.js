@@ -38,7 +38,7 @@ export default async function handler(req, res) {
           filters: [
             {
               field:    'type',
-              operator: 'equals',
+              operator: 'eq',
               value:    'stopdesk'
             }
           ]
