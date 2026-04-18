@@ -55,6 +55,7 @@ export default async function handler(req, res) {
     const data = await zrRes.json();
 
     // Shape the response — only send what the form needs
+    console.log('ZR raw response:', JSON.stringify(data).slice(0, 500));
     const stopdesks = (data.items || []).map(hub => ({
       id:           hub.id,
       name:         hub.name,
