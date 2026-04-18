@@ -1,27 +1,19 @@
-// ============================================================
-//  ZR Express — Fetch Stopdesks
-//  GET /api/get-stopdesks
-//  Fetches all hubs of type "stopdesk" from ZR Express API
-//  Credentials stay server-side in Vercel env vars
-// ============================================================
-
+// api/get-stopdesks.js
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  const TENANT  = process.env.ZR_TENANT;    // Your X-Tenant ID
-  const API_KEY = process.env.ZR_API_KEY;   // Your X-Api-Key
+  const TENANT  = process.env.ZR_TENANT;
+  const API_KEY = process.env.ZR_API_KEY;
 
   if (!TENANT || !API_KEY) {
     return res.status(500).json({ error: 'Missing ZR Express credentials in environment' });
   }
 
   try {
-    // Fetch all stopdesks — paginate if needed (pageSize 100 covers most cases)
     const zrRes = await fetch('https://api.zrexpress.app/api/v1/hubs/search', {
       method: 'POST',
       headers: {
@@ -32,17 +24,8 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         pageNumber: 1,
-        pageSize:   100,
-        advancedFilter: {
-          logic: 'AND',
-          filters: [
-            {
-              field:    'type',
-              operator: 'eq',
-              value:    'stopdesk'
-            }
-          ]
-        }
+        pageSize:   1000
+        // no filter — return all hubs
       })
     });
 
@@ -53,12 +36,12 @@ export default async function handler(req, res) {
     }
 
     const data = await zrRes.json();
+    console.log('ZR total hubs:', data.totalCount);
 
-    // Shape the response — only send what the form needs
-    console.log('ZR raw response:', JSON.stringify(data).slice(0, 500));
     const stopdesks = (data.items || []).map(hub => ({
       id:           hub.id,
       name:         hub.name,
+      type:         hub.type,
       city:         hub.address?.city     || '',
       district:     hub.address?.district || '',
       street:       hub.address?.street   || '',
@@ -66,12 +49,11 @@ export default async function handler(req, res) {
       phone:        hub.phone?.number1    || ''
     }));
 
-    // Cache for 10 minutes — stopdesks don't change often
     res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate');
     return res.status(200).json({ stopdesks });
 
   } catch (err) {
-    console.error('Network error fetching stopdesks:', err);
+    console.error('Network error:', err);
     return res.status(500).json({ error: 'Network error' });
   }
 }
