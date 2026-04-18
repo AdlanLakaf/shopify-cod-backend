@@ -4,6 +4,6 @@
   "description": "Shopify COD order creation backend for Algerian stores",
   "private": true,
   "engines": {
-    "node": "18.x"
+    "node": "24.x"
   }
 }
