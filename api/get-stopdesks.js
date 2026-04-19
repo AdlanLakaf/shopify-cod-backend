@@ -3,7 +3,6 @@
 //  GET /api/get-stopdesks
 //  Security: rate limiting + origin check (no HMAC — GET request)
 // ============================================================
-
 import { runSecurityChecks } from './_security.js';
 
 export default async function handler(req, res) {
@@ -22,8 +21,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Fetch all hubs with no filter — filter by type client-side
-    // This avoids any operator/value mismatch with the ZR Express API
     const zrRes = await fetch('https://api.zrexpress.app/api/v1/hubs/search', {
       method: 'POST',
       headers: {
@@ -46,17 +43,17 @@ export default async function handler(req, res) {
 
     const data = await zrRes.json();
 
-    // Filter by IsPickupPoint — hubs the customer can pick up from
     const stopdesks = (data.items || [])
       .filter(hub => hub.isPickupPoint === true)
       .map(hub => ({
         id:           hub.id,
         name:         hub.name,
-        city:         hub.address?.city     || '',
-        district:     hub.address?.district || '',
-        street:       hub.address?.street   || '',
-        openingHours: hub.openingHours      || '',
-        phone:        hub.phone?.number1    || ''
+        city:         hub.address?.city       || '',
+        district:     hub.address?.district   || '',
+        street:       hub.address?.street     || '',
+        postalCode:   hub.address?.postalCode || '',   // e.g. "01001" — first 2 digits = wilaya code
+        openingHours: hub.openingHours        || '',
+        phone:        hub.phone?.number1      || ''
       }));
 
     console.log(`Found ${stopdesks.length} pickup points out of ${data.items?.length || 0} total hubs`);
