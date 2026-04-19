@@ -32,11 +32,11 @@ export default async function handler(req, res) {
         'X-Api-Key':    API_KEY
       },
       body: JSON.stringify({
-        pageNumber: 1,
         advancedFilter: {
           logic: 'AND',
           filters: [{ field: 'type', operator: 'eq', value: 'stopdesk' }]
-        }
+        },
+        pageNumber: 1,
         pageSize:   1000,
       })
     });
