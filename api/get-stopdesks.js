@@ -7,7 +7,6 @@
 import { runSecurityChecks } from './_security.js';
 
 export default async function handler(req, res) {
-  // skipHmac=true because GET requests don't have a body to sign
   const blocked = runSecurityChecks(req, res, { skipHmac: true });
   if (blocked) return;
 
@@ -23,6 +22,8 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Fetch all hubs with no filter — filter by type client-side
+    // This avoids any operator/value mismatch with the ZR Express API
     const zrRes = await fetch('https://api.zrexpress.app/api/v1/hubs/search', {
       method: 'POST',
       headers: {
@@ -32,12 +33,8 @@ export default async function handler(req, res) {
         'X-Api-Key':    API_KEY
       },
       body: JSON.stringify({
-        advancedFilter: {
-          logic: 'AND',
-          filters: [{ field: 'type', operator: 'eq', value: 'stopdesk' }]
-        },
         pageNumber: 1,
-        pageSize:   1000,
+        pageSize:   1000
       })
     });
 
@@ -49,17 +46,25 @@ export default async function handler(req, res) {
 
     const data = await zrRes.json();
 
-    const stopdesks = (data.items || []).map(hub => ({
-      id:           hub.id,
-      name:         hub.name,
-      city:         hub.address?.city     || '',
-      district:     hub.address?.district || '',
-      street:       hub.address?.street   || '',
-      openingHours: hub.openingHours      || '',
-      phone:        hub.phone?.number1    || ''
-    }));
+    // Log all types returned so we can see exact values
+    const allTypes = [...new Set((data.items || []).map(h => h.type))];
+    console.log('Hub types returned by ZR Express:', allTypes);
 
-    // Cache 10 minutes on Vercel edge
+    // Filter client-side — type contains 'stopdesk' (case-insensitive)
+    const stopdesks = (data.items || [])
+      .filter(hub => hub.type?.toLowerCase().includes('stopdesk'))
+      .map(hub => ({
+        id:           hub.id,
+        name:         hub.name,
+        city:         hub.address?.city     || '',
+        district:     hub.address?.district || '',
+        street:       hub.address?.street   || '',
+        openingHours: hub.openingHours      || '',
+        phone:        hub.phone?.number1    || ''
+      }));
+
+    console.log(`Found ${stopdesks.length} stopdesks out of ${data.items?.length || 0} total hubs`);
+
     res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate');
     return res.status(200).json({ stopdesks });
 
