@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Shopify COD order creation backend for Algerian stores",
   "private": true,
+  "type": "module"
   "engines": {
     "node": "24.x"
   }
