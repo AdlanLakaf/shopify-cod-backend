@@ -40,10 +40,8 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
+  // Address is always built by the frontend — always present
   const isOfficePickup = deliveryType === 'استلام من المكتب';
-  if (!isOfficePickup && !address) {
-    return res.status(400).json({ error: 'Address is required for home delivery' });
-  }
 
   // Sanitize — strip HTML tags, limit length
   const sanitize = str => String(str || '').replace(/<[^>]*>/g, '').trim().slice(0, 200);
