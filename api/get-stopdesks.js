@@ -43,16 +43,12 @@ export default async function handler(req, res) {
       console.error('ZR Express error:', err);
       return res.status(502).json({ error: 'Failed to fetch stopdesks from ZR Express' });
     }
-    
-    const data = await zrRes.json();
-    console.log('All hubs:', JSON.stringify(data.items, null, 2));
-    // Log all types returned so we can see exact values
-    const allTypes = [...new Set((data.items || []).map(h => h.type))];
-    console.log('Hub types returned by ZR Express:', allTypes);
 
-    // Filter client-side — type contains 'stopdesk' (case-insensitive)
+    const data = await zrRes.json();
+
+    // Filter by IsPickupPoint — hubs the customer can pick up from
     const stopdesks = (data.items || [])
-      .filter(hub => hub.type?.toLowerCase().includes('stopdesk'))
+      .filter(hub => hub.isPickupPoint === true)
       .map(hub => ({
         id:           hub.id,
         name:         hub.name,
@@ -63,7 +59,7 @@ export default async function handler(req, res) {
         phone:        hub.phone?.number1    || ''
       }));
 
-    console.log(`Found ${stopdesks.length} stopdesks out of ${data.items?.length || 0} total hubs`);
+    console.log(`Found ${stopdesks.length} pickup points out of ${data.items?.length || 0} total hubs`);
 
     res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate');
     return res.status(200).json({ stopdesks });
