@@ -32,12 +32,7 @@ export default async function handler(req, res) {
         'X-Api-Key':    API_KEY
       },
       body: JSON.stringify({
-        pageNumber: 1,
-        pageSize:   100,
-        advancedFilter: {
-          logic: 'AND',
-          filters: [{ field: 'type', operator: 'equals', value: 'stopdesk' }]
-        }
+        pageSize:   1000,
       })
     });
 
