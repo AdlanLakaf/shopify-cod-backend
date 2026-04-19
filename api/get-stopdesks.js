@@ -43,9 +43,9 @@ export default async function handler(req, res) {
       console.error('ZR Express error:', err);
       return res.status(502).json({ error: 'Failed to fetch stopdesks from ZR Express' });
     }
-
+    
     const data = await zrRes.json();
-
+    console.log('All hubs:', JSON.stringify(data.items, null, 2));
     // Log all types returned so we can see exact values
     const allTypes = [...new Set((data.items || []).map(h => h.type))];
     console.log('Hub types returned by ZR Express:', allTypes);
