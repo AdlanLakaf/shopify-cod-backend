@@ -94,10 +94,10 @@ export default async function handler(req, res) {
   }
 
   // ── Config check ─────────────────────────────────────────────────────────
-  const tenantId = process.env.ZR_TENANT_ID;
+  const tenantId = process.env.ZR_TENANT;
   if (!tenantId) {
-    console.error('[get-delivery-rates] ZR_TENANT_ID env var is missing');
-    return res.status(500).json({ error: 'Delivery pricing not configured — set ZR_TENANT_ID' });
+    console.error('[get-delivery-rates] ZR_TENANT env var is missing');
+    return res.status(500).json({ error: 'Delivery pricing not configured — set ZR_TENANT' });
   }
 
   // ── Serve cache if still fresh ────────────────────────────────────────────
