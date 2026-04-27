@@ -54,19 +54,9 @@ function normalise(raw) {
       const type  = (dp.deliveryType || '').toLowerCase();
       const price = (dp.discountedPrice != null) ? dp.discountedPrice : dp.price;
 
-      if (
-        type === 'home_delivery' ||
-        type.includes('home')     ||
-        type.includes('domicile') ||
-        type.includes('door')
-      ) {
+      if (type === 'home') {
         entry.home = price;
-      } else if (
-        type === 'desk_delivery' ||
-        type.includes('desk')     ||
-        type.includes('office')   ||
-        type.includes('stopdesk')
-      ) {
+      } else if (type === 'pickup-point') {
         entry.desk = price;
       } else {
         // Unknown type: fill home first, then desk
