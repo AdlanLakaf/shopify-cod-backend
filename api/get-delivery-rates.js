@@ -95,9 +95,14 @@ export default async function handler(req, res) {
 
   // ── Config check ─────────────────────────────────────────────────────────
   const tenantId = process.env.ZR_TENANT;
+  const apiKey   = process.env.ZR_API_KEY;
   if (!tenantId) {
     console.error('[get-delivery-rates] ZR_TENANT env var is missing');
     return res.status(500).json({ error: 'Delivery pricing not configured — set ZR_TENANT' });
+  }
+  if (!tenantId || !apiKey) {
+    console.error('[get-delivery-rates] ZR_API_KEY env var is missing');
+    return res.status(500).json({ error: 'Missing ZR Express credentials -- set ZR_API_KEY' });
   }
 
   // ── Serve cache if still fresh ────────────────────────────────────────────
@@ -114,6 +119,7 @@ export default async function handler(req, res) {
       headers: {
         'Accept':   'application/json',
         'X-Tenant': tenantId,
+        'X-Api-Key': apiKey,
       },
     });
 
