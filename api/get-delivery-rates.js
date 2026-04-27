@@ -140,7 +140,7 @@ export default async function handler(req, res) {
     }
 
     const raw        = await upstream.json();
-    console.log(raw);
+    console.log(JSON.stringify(raw, null, 2));
     const normalised = normalise(raw);
 
     _cache   = normalised;
