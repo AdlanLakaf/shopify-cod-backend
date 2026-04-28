@@ -1,93 +1,54 @@
 /**
  * GET /api/get-page-data
  *
- * Single endpoint that returns everything the Shopify order form needs:
- *   • wilayas[]       — all 58 wilayas with names (ar + en)
- *   • communes[]      — all communes keyed by wilaya_code
- *   • delivery rates  — home + desk prices per wilaya
- *   • hubs[]          — pickup points per wilaya (wilayaId = numeric wilaya code)
+ * Single endpoint returning everything the Shopify order form needs:
+ *   wilayas, communes, delivery rates, and pickup hubs — all merged.
  *
- * Cached in-memory for 10 minutes. One call replaces three.
- *
- * Security: CORS (store-restricted) + rate limiting + GET guard.
- * No HMAC — GET has no body to sign.
- *
- * Response shape:
- * {
- *   wilayas: {
- *     "23": {
- *       id: 23,
- *       nameAr: "عنابة",
- *       nameEn: "Annaba",
- *       homePrice: 400,
- *       deskPrice: 250,
- *       hubs: [
- *         {
- *           id: "...",
- *           name: "...",
- *           city: "...",
- *           district: "...",
- *           street: "...",
- *           openingHours: "...",
- *           phone: "..."
- *         }
- *       ],
- *       communes: [
- *         { id: 841, nameAr: "عين الباردة", nameEn: "Ain El Berda" }
- *       ]
- *     },
- *     ...
- *   },
- *   cachedAt: 1714200000000
- * }
+ * Cached in-memory for 10 minutes.
  */
 
 import { runSecurityChecks } from './_security.js';
+import { readFileSync }      from 'fs';
+import { fileURLToPath }     from 'url';
+import { dirname, join }     from 'path';
 
-// ── Static data (wilayas + communes shipped with the bundle) ─────────────────
-// These never change at runtime so we import them directly.
-import WILAYAS_RAW  from '../data/wilayas.json'   assert { type: 'json' };
-import COMMUNES_RAW from '../data/communes.json'  assert { type: 'json' };
+// ── Load static JSON files (compatible with all Node versions) ───────────────
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// ── ZR Express config ─────────────────────────────────────────────────────────
+let WILAYAS_RAW, COMMUNES_RAW;
+try {
+  WILAYAS_RAW  = JSON.parse(readFileSync(join(__dirname, 'data', 'wilayas.json'),  'utf8'));
+  COMMUNES_RAW = JSON.parse(readFileSync(join(__dirname, 'data', 'communes.json'), 'utf8'));
+} catch (e) {
+  console.error('[get-page-data] Failed to load static JSON files:', e.message);
+}
+
+// ── ZR Express endpoints ─────────────────────────────────────────────────────
 const ZR_RATES_URL = 'https://api.zrexpress.app/api/v1/delivery-pricing/rates';
 const ZR_HUBS_URL  = 'https://api.zrexpress.app/api/v1/hubs/search';
 
 // ── In-memory cache ───────────────────────────────────────────────────────────
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const CACHE_TTL_MS = 10 * 60 * 1000;
 let _cache   = null;
 let _cacheTs = 0;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/**
- * Parse wilaya code from a postal code string.
- * ZR Express postal codes are 5-digit strings like "23001".
- * We strip leading zeros and return the numeric wilaya id.
- */
 function wilayaCodeFromPostal(postalCode) {
   if (!postalCode) return null;
-  const s = String(postalCode).trim();
-  // Take first 2 chars, parse as int to drop leading zero ("01" → 1, "23" → 23)
-  const prefix = parseInt(s.slice(0, 2), 10);
+  const prefix = parseInt(String(postalCode).trim().slice(0, 2), 10);
   return isNaN(prefix) ? null : prefix;
 }
 
-/**
- * Normalise ZR Express delivery-pricing response into
- * { [wilayaCode]: { home, desk } }
- */
 function normaliseRates(raw) {
   const map = {};
   for (const territory of (raw.rates || [])) {
     const code = territory.toTerritoryCode;
     if (!code) continue;
-
     const entry = { home: null, desk: null };
     for (const dp of (territory.deliveryPrices || [])) {
       const type  = (dp.deliveryType || '').toLowerCase();
       const price = dp.discountedPrice != null ? dp.discountedPrice : dp.price;
-
       if (type === 'home') {
         entry.home = price;
       } else if (type === 'pickup-point') {
@@ -102,26 +63,18 @@ function normaliseRates(raw) {
   return map;
 }
 
-/**
- * Build the unified wilaya map from static JSON + live ZR data.
- *
- * wilayas.json shape:  { wilaya_code, wilaya_name (ar), wilaya_name_ascii (en) }
- * communes.json shape: { id, wilaya_code, commune_name (ar), commune_name_ascii (en) }
- */
 function buildWilayaMap(rates, hubs) {
-  // Index communes by wilaya_code for O(1) lookup
   const communesByWilaya = {};
   for (const c of COMMUNES_RAW) {
-    const key = String(parseInt(c.wilaya_code, 10)); // "01" → "1"
+    const key = String(parseInt(c.wilaya_code, 10));
     if (!communesByWilaya[key]) communesByWilaya[key] = [];
     communesByWilaya[key].push({
-      id:    c.id,
+      id:     c.id,
       nameAr: c.commune_name       || '',
       nameEn: c.commune_name_ascii || ''
     });
   }
 
-  // Index hubs by wilaya code
   const hubsByWilaya = {};
   for (const hub of hubs) {
     const key = String(hub.wilayaId);
@@ -139,10 +92,9 @@ function buildWilayaMap(rates, hubs) {
 
   const result = {};
   for (const w of WILAYAS_RAW) {
-    const numericId = parseInt(w.wilaya_code, 10); // e.g. 23
-    const key       = String(numericId);            // "23"
+    const numericId = parseInt(w.wilaya_code, 10);
+    const key       = String(numericId);
     const rate      = rates[key] || { home: null, desk: null };
-
     result[key] = {
       id:        numericId,
       nameAr:    w.wilaya_name       || '',
@@ -156,27 +108,24 @@ function buildWilayaMap(rates, hubs) {
   return result;
 }
 
-// ── Fetch live data from ZR Express ──────────────────────────────────────────
+// ── ZR Express fetchers ───────────────────────────────────────────────────────
 
 async function fetchRates(tenant, apiKey) {
   const res = await fetch(ZR_RATES_URL, {
-    method: 'GET',
+    method:  'GET',
     headers: {
       Accept:      'application/json',
       'X-Tenant':  tenant,
       'X-Api-Key': apiKey
     }
   });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`ZR rates ${res.status}: ${body}`);
-  }
+  if (!res.ok) throw new Error(`ZR rates ${res.status}: ${await res.text()}`);
   return res.json();
 }
 
 async function fetchHubs(tenant, apiKey) {
   const res = await fetch(ZR_HUBS_URL, {
-    method: 'POST',
+    method:  'POST',
     headers: {
       'Content-Type': 'application/json',
       Accept:         'application/json',
@@ -185,36 +134,27 @@ async function fetchHubs(tenant, apiKey) {
     },
     body: JSON.stringify({ pageNumber: 1, pageSize: 1000 })
   });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`ZR hubs ${res.status}: ${body}`);
-  }
+  if (!res.ok) throw new Error(`ZR hubs ${res.status}: ${await res.text()}`);
   const data = await res.json();
 
-  // Only pickup points, and attach wilayaId resolved from postal code
   return (data.items || [])
     .filter(hub => hub.isPickupPoint === true)
-    .map(hub => {
-      const postal   = hub.address?.postalCode || '';
-      const wilayaId = wilayaCodeFromPostal(postal);
-      return {
-        id:           hub.id,
-        name:         hub.name || '',
-        city:         hub.address?.city     || '',
-        district:     hub.address?.district || '',
-        street:       hub.address?.street   || '',
-        openingHours: hub.openingHours      || '',
-        phone:        hub.phone?.number1    || '',
-        wilayaId                              // ← numeric, matches wilaya key
-      };
-    })
-    .filter(hub => hub.wilayaId !== null); // drop any hub with unparseable postal
+    .map(hub => ({
+      id:           hub.id,
+      name:         hub.name                || '',
+      city:         hub.address?.city       || '',
+      district:     hub.address?.district   || '',
+      street:       hub.address?.street     || '',
+      openingHours: hub.openingHours        || '',
+      phone:        hub.phone?.number1      || '',
+      wilayaId:     wilayaCodeFromPostal(hub.address?.postalCode)
+    }))
+    .filter(hub => hub.wilayaId !== null);
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
-  // Security: CORS + rate limiting (no HMAC for GET)
   const blocked = runSecurityChecks(req, res, { skipHmac: true });
   if (blocked) return;
 
@@ -222,15 +162,18 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const tenant = process.env.ZR_TENANT;
-  const apiKey = process.env.ZR_API_KEY;
-
-  if (!tenant || !apiKey) {
-    console.error('[get-page-data] Missing ZR_TENANT or ZR_API_KEY');
-    return res.status(500).json({ error: 'Server misconfiguration: missing ZR Express credentials' });
+  if (!WILAYAS_RAW || !COMMUNES_RAW) {
+    return res.status(500).json({
+      error: 'Static data files not found. Make sure api/data/wilayas.json and api/data/communes.json exist.'
+    });
   }
 
-  // ── Serve cache if fresh ─────────────────────────────────────────────────
+  const tenant = process.env.ZR_TENANT;
+  const apiKey = process.env.ZR_API_KEY;
+  if (!tenant || !apiKey) {
+    return res.status(500).json({ error: 'Missing ZR_TENANT or ZR_API_KEY env vars' });
+  }
+
   const now = Date.now();
   if (_cache && now - _cacheTs < CACHE_TTL_MS) {
     res.setHeader('X-Cache', 'HIT');
@@ -238,7 +181,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ wilayas: _cache, cachedAt: _cacheTs });
   }
 
-  // ── Fetch fresh data in parallel ─────────────────────────────────────────
   try {
     const [rawRates, hubs] = await Promise.all([
       fetchRates(tenant, apiKey),
@@ -256,15 +198,13 @@ export default async function handler(req, res) {
     return res.status(200).json({ wilayas, cachedAt: _cacheTs });
 
   } catch (err) {
-    console.error('[get-page-data] Fetch error:', err);
+    console.error('[get-page-data] Error:', err.message);
 
-    // Serve stale cache rather than a hard error
     if (_cache) {
       res.setHeader('X-Cache', 'STALE');
-      res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate');
       return res.status(200).json({ wilayas: _cache, cachedAt: _cacheTs, stale: true });
     }
 
-    return res.status(502).json({ error: 'Failed to load page data from ZR Express' });
+    return res.status(502).json({ error: err.message });
   }
 }
