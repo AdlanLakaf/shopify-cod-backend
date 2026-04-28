@@ -138,8 +138,10 @@ async function fetchHubs(tenant, apiKey) {
   const data = await res.json();
 
   return (data.items || [])
-    .filter(hub => hub.isPickupPoint === true)
-    .map(hub => ({
+  .filter(hub => hub.isPickupPoint === true)
+  .map(hub => {
+    const match = hub.name.match(/\d+/);
+    return {
       id:           hub.id,
       name:         hub.name                || '',
       city:         hub.address?.city       || '',
@@ -147,9 +149,10 @@ async function fetchHubs(tenant, apiKey) {
       street:       hub.address?.street     || '',
       openingHours: hub.openingHours        || '',
       phone:        hub.phone?.number1      || '',
-      wilayaId:     wilayaCodeFromPostal(hub.address?.postalCode)
-    }))
-    .filter(hub => hub.wilayaId !== null);
+      wilayaId:     match ? parseInt(match[0], 10) : null
+    };
+  })
+  .filter(hub => hub.wilayaId !== null);
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
