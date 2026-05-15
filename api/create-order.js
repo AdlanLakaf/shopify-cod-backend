@@ -8,7 +8,6 @@
 import { runSecurityChecks } from './_security.js';
 
 export default async function handler(req, res) {
-  // ── Run all security checks ──
   const blocked = runSecurityChecks(req, res);
   if (blocked) return;
 
@@ -40,11 +39,12 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
-  // Address is always built by the frontend — always present
   const isOfficePickup = deliveryType === 'استلام من المكتب';
 
-  // Sanitize — strip HTML tags, limit length
   const sanitize = str => String(str || '').replace(/<[^>]*>/g, '').trim().slice(0, 200);
+
+  // ── CHANGE 1: ref moved above sanitize calls so it's ready for orderNote ──
+  const ref = 'H&N-ORD-' + Date.now().toString(36).toUpperCase().slice(-6);
 
   const cleanName     = sanitize(name);
   const cleanPhone    = sanitize(phone).replace(/\s/g, '');
@@ -64,6 +64,7 @@ export default async function handler(req, res) {
   }
 
   const orderNote = [
+    `REF: ${ref}`,
     `الاسم: ${cleanName}`,
     `الهاتف: ${cleanPhone}`,
     `الولاية: ${cleanWilaya}`,
@@ -72,7 +73,7 @@ export default async function handler(req, res) {
     `نوع التوصيل: ${deliveryType || 'توصيل للمنزل'}`,
     `طريقة الدفع: الدفع عند الاستلام (COD)`,
     cleanNote ? `ملاحظة: ${cleanNote}` : ''
-  ].filter(Boolean).join(' | ');
+  ].filter(Boolean).join('\n');
 
   const draftPayload = {
     draft_order: {
@@ -90,7 +91,8 @@ export default async function handler(req, res) {
         province: cleanWilaya, country: 'DZ', zip: ''
       },
       note: orderNote,
-      tags: 'COD, جزائر, الدفع-عند-الاستلام',
+      // ── CHANGE 2: cleaner tags — wilaya for filtering, delivery type, ref ──
+      tags: `COD, ${cleanWilaya}, ${deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'}, REF-${ref}`,
       send_receipt: false,
       send_fulfillment_receipt: false,
       use_customer_default_address: false
@@ -134,22 +136,41 @@ export default async function handler(req, res) {
       console.error('Completion failed:', err);
       return res.status(502).json({ error: 'Order created but could not be completed', draftId });
     }
+
     const completeData = await completeRes.json();
-    const order = completeData.draft_order;
+    const order        = completeData.draft_order;
     console.log('Order completed:', order.order_id);
+
+    // ── CHANGE 3: fetch full order to get line_items with titles and prices ──
+    const fullOrderRes  = await fetch(
+      `https://${SHOP}/admin/api/${API_VER}/orders/${order.order_id}.json`,
+      { headers: { 'X-Shopify-Access-Token': TOKEN } }
+    );
+    const fullOrderData = await fullOrderRes.json();
+    const fullOrder     = fullOrderData.order;
+
+    // ── CHANGE 4: return ref + line items alongside customer data ──
     return res.status(200).json({
-        success: true,
-        orderId: order.order_id,
-        orderName: order.name,
-        // Pass customer info back so frontend can redirect with it
-        name: cleanName,
-        phone: cleanPhone,
-        wilaya: cleanWilaya,
-        baladiya: cleanBaladiya,
-        address: cleanAddress,
-        deliveryType: deliveryType || 'توصيل للمنزل',
-        total: order.total_price
+      success:      true,
+      ref,                          // H&N-ORD-K3F9QX — shown to customer
+      orderId:      order.order_id, // real Shopify ID — kept for internal use
+      orderName:    order.name,     // real Shopify name e.g. #D27 — kept for internal use
+      name:         cleanName,
+      phone:        cleanPhone,
+      wilaya:       cleanWilaya,
+      baladiya:     cleanBaladiya,
+      address:      cleanAddress,
+      deliveryType: deliveryType || 'توصيل للمنزل',
+      total:        fullOrder?.total_price        || order.total_price || '0',
+      // ── CHANGE 5: map line items for the thank you page ──
+      lineItems:    (fullOrder?.line_items || []).map(item => ({
+        title:    item.title,
+        variant:  item.variant_title || '',
+        quantity: item.quantity,
+        price:    item.price
+      }))
     });
+
   } catch (err) {
     console.error('Network error completing draft:', err);
     return res.status(500).json({ error: 'Network error completing order' });
