@@ -54,7 +54,7 @@ export default async function handler(req, res) {
   const cleanWilaya   = sanitize(wilaya);
   const cleanBaladiya = sanitize(baladiya);
   const cleanAddress  = sanitize(address);
-  const cleanNote     = sanitize(extraNote);
+  const cleanNote = sanitize(extraNote).replace(/[\n\r]/g, ' ');
 
   const algerianPhoneRegex = /^(05|06|07)\d{8}$/;
   if (!algerianPhoneRegex.test(cleanPhone)) {
@@ -144,35 +144,44 @@ export default async function handler(req, res) {
     const order        = completeData.draft_order;
     console.log('Order completed:', order.order_id);
 
-    // ── CHANGE 3: fetch full order to get line_items with titles and prices ──
-    const fullOrderRes  = await fetch(
-      `https://${SHOP}/admin/api/${API_VER}/orders/${order.order_id}.json`,
-      { headers: { 'X-Shopify-Access-Token': TOKEN } }
-    );
-    const fullOrderData = await fullOrderRes.json();
-    const fullOrder     = fullOrderData.order;
+   // ── Fetch full order to get line_items ──
+let fullOrder = null;
 
-    // ── CHANGE 4: return ref + line items alongside customer data ──
-    return res.status(200).json({
-      success:      true,
-      ref,                          // H&N-ORD-K3F9QX — shown to customer
-      orderId:      order.order_id, // real Shopify ID — kept for internal use
-      orderName:    order.name,     // real Shopify name e.g. #D27 — kept for internal use
-      name:         cleanName,
-      phone:        cleanPhone,
-      wilaya:       cleanWilaya,
-      baladiya:     cleanBaladiya,
-      address:      cleanAddress,
-      deliveryType: deliveryType || 'توصيل للمنزل',
-      total:        fullOrder?.total_price        || order.total_price || '0',
-      // ── CHANGE 5: map line items for the thank you page ──
-      lineItems:    (fullOrder?.line_items || []).map(item => ({
-        title:    item.title,
-        variant:  item.variant_title || '',
-        quantity: item.quantity,
-        price:    item.price
-      }))
-    });
+try {
+  const fullOrderRes = await fetch(
+    `https://${SHOP}/admin/api/${API_VER}/orders/${order.order_id}.json`,
+    { headers: { 'X-Shopify-Access-Token': TOKEN } }
+  );
+
+  if (!fullOrderRes.ok) {
+    console.error('Failed to fetch full order details:', order.order_id);
+  } else {
+    const fullOrderData = await fullOrderRes.json();
+    fullOrder = fullOrderData.order;
+  }
+} catch (err) {
+  console.error('Network error fetching full order:', err);
+}
+
+return res.status(200).json({
+  success:      true,
+  ref,
+  orderId:      order.order_id,
+  orderName:    order.name,
+  name:         cleanName,
+  phone:        cleanPhone,
+  wilaya:       cleanWilaya,
+  baladiya:     cleanBaladiya,
+  address:      cleanAddress,
+  deliveryType: deliveryType || 'توصيل للمنزل',
+  total:        fullOrder?.total_price || order.total_price || '0',
+  lineItems:    (fullOrder?.line_items || []).map(item => ({
+    title:    item.title,
+    variant:  item.variant_title || '',
+    quantity: item.quantity,
+    price:    item.price
+  }))
+});
 
   } catch (err) {
     console.error('Network error completing draft:', err);
