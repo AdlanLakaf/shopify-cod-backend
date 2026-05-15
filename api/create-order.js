@@ -10,7 +10,10 @@ import { runSecurityChecks } from './_security.js';
 export default async function handler(req, res) {
   const blocked = runSecurityChecks(req, res);
   if (blocked) return;
-
+  // ── Turnstile bot check ──
+  const turnstileBlock = await verifyTurnstile(req, res);
+  if (turnstileBlock) return;
+  
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
