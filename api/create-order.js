@@ -137,7 +137,19 @@ export default async function handler(req, res) {
     const completeData = await completeRes.json();
     const order = completeData.draft_order;
     console.log('Order completed:', order.order_id);
-    return res.status(200).json({ success: true, orderId: order.order_id, orderName: order.name });
+    return res.status(200).json({
+        success: true,
+        orderId: order.order_id,
+        orderName: order.name,
+        // Pass customer info back so frontend can redirect with it
+        name: cleanName,
+        phone: cleanPhone,
+        wilaya: cleanWilaya,
+        baladiya: cleanBaladiya,
+        address: cleanAddress,
+        deliveryType: deliveryType || 'توصيل للمنزل',
+        total: order.total_price
+    });
   } catch (err) {
     console.error('Network error completing draft:', err);
     return res.status(500).json({ error: 'Network error completing order' });
