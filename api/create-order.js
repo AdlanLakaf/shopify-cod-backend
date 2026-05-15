@@ -5,7 +5,7 @@
 //  Security: HMAC + timestamp + rate limiting + origin check
 // ============================================================
 
-import { runSecurityChecks } from './_security.js';
+import { runSecurityChecks, verifyTurnstile  } from './_security.js';
 
 export default async function handler(req, res) {
   const blocked = runSecurityChecks(req, res);
