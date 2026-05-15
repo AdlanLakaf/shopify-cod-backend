@@ -125,14 +125,62 @@ export function verifyHmac(req, res) {
   return null; // OK
 }
 
+// ── 5. Cloudflare Turnstile bot verification ──
+export async function verifyTurnstile(req, res) {
+  const SECRET = process.env.TURNSTILE_SECRET;
+
+  if (!SECRET) {
+    console.warn('⚠️  TURNSTILE_SECRET not set — skipping bot check');
+    return null;
+  }
+
+  const token = req.body?.turnstileToken;
+
+  if (!token) {
+    return res.status(403).json({ error: 'Missing bot verification token' });
+  }
+
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+    || req.socket?.remoteAddress
+    || '';
+
+  try {
+    const verifyRes = await fetch(
+      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          secret:   SECRET,
+          response: token,
+          remoteip: ip
+        })
+      }
+    );
+
+    const data = await verifyRes.json();
+
+    if (!data.success) {
+      console.warn('⚠️  Turnstile failed:', data['error-codes'], 'IP:', ip);
+      return res.status(403).json({ error: 'Bot verification failed' });
+    }
+
+    return null; // OK
+  } catch (err) {
+    console.error('Turnstile verification error:', err);
+    // Fail open — don't block real users if Cloudflare is down
+    return null;
+  }
+}
 // ── 5. Run all security checks in order ──
 // Returns a response if blocked, null if all checks pass
-export function runSecurityChecks(req, res, { skipHmac = false } = {}) {
+// ── 6. Run all security checks in order ──
+export function runSecurityChecks(req, res, { skipHmac = false, skipTurnstile = false } = {}) {
   setCorsHeaders(req, res);
 
   if (req.method === 'OPTIONS') {
     res.status(200).end();
-    return true; // signals caller to return early
+    return true;
   }
 
   const rateLimitResult = checkRateLimit(req, res);
@@ -146,7 +194,9 @@ export function runSecurityChecks(req, res, { skipHmac = false } = {}) {
       const hmacResult = verifyHmac(req, res);
       if (hmacResult) return true;
     }
+
+    // ── Turnstile is async so it's handled in the handler directly ──
   }
 
-  return false; // all checks passed
+  return false;
 }
