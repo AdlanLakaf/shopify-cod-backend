@@ -20,7 +20,7 @@ export default async function handler(req, res) {
 
   const SHOP    = process.env.SHOPIFY_STORE_DOMAIN;
   const TOKEN   = process.env.SHOPIFY_ADMIN_TOKEN;
-  const API_VER = '2024-01';
+  const API_VER = '2024-10';
 
   if (!SHOP || !TOKEN) {
     return res.status(500).json({ error: 'Missing Shopify credentials in environment' });
