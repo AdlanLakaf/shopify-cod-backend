@@ -8,7 +8,7 @@
 import { runSecurityChecks, verifyTurnstile  } from './_security.js';
 
 export default async function handler(req, res) {
-  const blocked = runSecurityChecks(req, res);
+  const blocked = runSecurityChecks(req, res, { skipHmac: true });
   if (blocked) return;
   // ── Turnstile bot check ──
   const turnstileBlock = await verifyTurnstile(req, res);
@@ -28,13 +28,14 @@ export default async function handler(req, res) {
 
   const {
     variantId,
-    quantity    = 1,
+    quantity     = 1,
     name,
     phone,
     wilaya,
     baladiya,
     address,
     deliveryType,
+    shippingCost,
     note: extraNote = ''
   } = req.body;
 
@@ -94,7 +95,12 @@ export default async function handler(req, res) {
         province: cleanWilaya, country: 'DZ', zip: ''
       },
       note: orderNote,
-      // ── CHANGE 2: cleaner tags — wilaya for filtering, delivery type, ref ──
+      // ── Shipping line — records delivery cost visibly in Shopify admin ──
+      shipping_line: {
+        title: deliveryType === 'استلام من المكتب' ? 'Office Pickup / استلام من المكتب' : 'Home Delivery / توصيل للمنزل',
+        price: (typeof shippingCost === 'number' && shippingCost >= 0) ? shippingCost.toFixed(2) : '0.00',
+        code:  deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'
+      },
       tags: `COD, ${cleanWilaya}, ${deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'}, REF-${ref}`,
       send_receipt: false,
       send_fulfillment_receipt: false,

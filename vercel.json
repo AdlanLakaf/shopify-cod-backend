@@ -1,9 +1,9 @@
 {
   "version": 2,
   "routes": [
-    {
-      "src": "/api/create-order",
-      "dest": "/api/create-order.js"
-    }
+    { "src": "/api/create-order",       "dest": "/api/create-order.js" },
+    { "src": "/api/get-page-data",      "dest": "/api/get-page-data.js" },
+    { "src": "/api/get-delivery-rates", "dest": "/api/get-delivery-rates.js" },
+    { "src": "/api/get-stopdesks",      "dest": "/api/get-stopdesks.js" }
   ]
 }

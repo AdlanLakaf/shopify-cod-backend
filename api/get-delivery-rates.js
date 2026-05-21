@@ -130,7 +130,7 @@ export default async function handler(req, res) {
     }
 
     const raw        = await upstream.json();
-    console.log(JSON.stringify(raw, null, 2));
+    console.log(`[get-delivery-rates] Fetched ${(raw.rates || []).length} territory rates from ZR Express`);
     const normalised = normalise(raw);
 
     _cache   = normalised;

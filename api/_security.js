@@ -27,14 +27,12 @@ export function setCorsHeaders(req, res) {
     SHOP_MYSHOPIFY     ? `https://${SHOP_MYSHOPIFY}` : null,  // myshopify domain
   ].filter(Boolean);
 
-  // Also allow any *.myshopify.com for theme preview URLs
-  const isAllowed = allowedOrigins.includes(origin) ||
-    origin.endsWith('.myshopify.com') ||
-    origin.includes('shopify.com');
+  // Only allow exact store domains — no wildcard myshopify.com
+  const isAllowed = allowedOrigins.length > 0 && allowedOrigins.includes(origin);
 
   res.setHeader(
     'Access-Control-Allow-Origin',
-    isAllowed ? origin : (allowedOrigins[0] || '*')
+    isAllowed ? origin : (allowedOrigins[0] || '')
   );
 
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');

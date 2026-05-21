@@ -140,7 +140,15 @@ async function fetchHubs(tenant, apiKey) {
   return (data.items || [])
   .filter(hub => hub.isPickupPoint === true)
   .map(hub => {
-    const match = hub.name.match(/\d+/);
+    // Prefer explicit API fields; fall back to extracting a 1-2 digit number
+    // from the hub name (wilaya codes are 1–58), validated against that range.
+    const wilayaId = (() => {
+      if (hub.wilayaCode) return parseInt(hub.wilayaCode, 10);
+      if (hub.wilayaId)   return parseInt(hub.wilayaId,   10);
+      if (hub.address?.wilayaCode) return parseInt(hub.address.wilayaCode, 10);
+      const m = hub.name.match(/\b(\d{1,2})\b/);
+      return m ? parseInt(m[1], 10) : null;
+    })();
     return {
       id:           hub.id,
       name:         hub.name                || '',
@@ -149,7 +157,7 @@ async function fetchHubs(tenant, apiKey) {
       street:       hub.address?.street     || '',
       openingHours: hub.openingHours        || '',
       phone:        hub.phone?.number1      || '',
-      wilayaId:     match ? parseInt(match[0], 10) : null
+      wilayaId:     (wilayaId >= 1 && wilayaId <= 58) ? wilayaId : null
     };
   })
   .filter(hub => hub.wilayaId !== null);
