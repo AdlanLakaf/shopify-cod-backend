@@ -18,7 +18,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const SHOP    = process.env.SHOPIFY_STORE_DOMAIN;
+  const SHOP    = process.env.SHOPIFY_MYSHOPIFY_DOMAIN || process.env.SHOPIFY_STORE_DOMAIN;
   const TOKEN   = process.env.SHOPIFY_ADMIN_TOKEN;
   const API_VER = '2024-10';
 
