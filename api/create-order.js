@@ -39,13 +39,17 @@ export default async function handler(req, res) {
     shippingCost,
     note: extraNote = '',
     // ── Tracking fields from frontend ──
-    eventId    = '',
-    fbp        = '',
-    fbc        = '',
-    gaClientId = '',
-    ttp        = '',
-    ttclid     = '',
-    sourceUrl  = ''
+    eventId         = '',
+    fbp             = '',
+    fbc             = '',
+    gaClientId      = '',
+    sessionId       = '',
+    ttp             = '',
+    ttclid          = '',
+    gclid           = '',
+    sourceUrl       = '',
+    productTitle    = '',
+    contentCategory = ''
   } = req.body;
 
   if (!variantId || !name || !phone || !wilaya || !baladiya) {
@@ -181,20 +185,26 @@ try {
 // ── Server-side conversion tracking — awaited so Vercel doesn't cut it off ──
 await trackPurchase({
   ref,
-  total:     fullOrder?.total_price || order.total_price || '0',
-  variantId: variantIdInt,
-  quantity:  Math.min(parseInt(quantity) || 1, 10),
-  phone:     cleanPhone,
-  name:      cleanName,
-  eventId:   eventId || ref,
+  total:           fullOrder?.total_price || order.total_price || '0',
+  variantId:       variantIdInt,
+  quantity:        Math.min(parseInt(quantity) || 1, 10),
+  phone:           cleanPhone,
+  name:            cleanName,
+  city:            cleanBaladiya,
+  state:           cleanWilaya,
+  eventId:         eventId || ref,
   fbp,
   fbc,
   gaClientId,
+  sessionId,
   ttp,
   ttclid,
+  gclid,
   sourceUrl,
-  ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
-  userAgent: req.headers['user-agent'] || ''
+  productTitle,
+  contentCategory,
+  ip:              req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
+  userAgent:       req.headers['user-agent'] || ''
 }).catch(err => console.error('[order] trackPurchase error:', err.message));
 
 return res.status(200).json({
