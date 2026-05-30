@@ -186,6 +186,7 @@ try {
 await trackPurchase({
   ref,
   total:           fullOrder?.total_price || order.total_price || '0',
+  unitPrice:       fullOrder?.line_items?.[0]?.price || '0',
   variantId:       variantIdInt,
   quantity:        Math.min(parseInt(quantity) || 1, 10),
   phone:           cleanPhone,

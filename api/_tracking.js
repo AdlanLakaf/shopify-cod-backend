@@ -22,7 +22,7 @@ function toE164DZ(phone) {
 }
 
 // ── GA4 Measurement Protocol ───────────────────────────────────
-async function trackGA4({ ref, total, variantId, quantity, productTitle, gaClientId, sessionId }) {
+async function trackGA4({ ref, total, unitPrice, variantId, quantity, productTitle, gaClientId, sessionId }) {
   const MEASUREMENT_ID = process.env.GA4_MEASUREMENT_ID;
   const API_SECRET     = process.env.GA4_API_SECRET;
 
@@ -41,7 +41,7 @@ async function trackGA4({ ref, total, variantId, quantity, productTitle, gaClien
       item_id:   String(variantId),
       item_name: productTitle || '',
       quantity:  parseInt(quantity) || 1,
-      price:     parseFloat(total) || 0
+      price:     parseFloat(unitPrice) || 0
     }]
   };
 
