@@ -5,7 +5,8 @@
 //  Security: HMAC + timestamp + rate limiting + origin check
 // ============================================================
 
-import { runSecurityChecks, verifyTurnstile  } from './_security.js';
+import { runSecurityChecks, verifyTurnstile } from './_security.js';
+import { trackPurchase } from './_tracking.js';
 
 export default async function handler(req, res) {
   const blocked = runSecurityChecks(req, res, { skipHmac: true });
@@ -28,7 +29,7 @@ export default async function handler(req, res) {
 
   const {
     variantId,
-    quantity     = 1,
+    quantity       = 1,
     name,
     phone,
     wilaya,
@@ -36,7 +37,15 @@ export default async function handler(req, res) {
     address,
     deliveryType,
     shippingCost,
-    note: extraNote = ''
+    note: extraNote = '',
+    // ── Tracking fields from frontend ──
+    eventId    = '',
+    fbp        = '',
+    fbc        = '',
+    gaClientId = '',
+    ttp        = '',
+    ttclid     = '',
+    sourceUrl  = ''
   } = req.body;
 
   if (!variantId || !name || !phone || !wilaya || !baladiya) {
@@ -168,6 +177,25 @@ try {
 } catch (err) {
   console.error('Network error fetching full order:', err);
 }
+
+// ── Server-side conversion tracking — non-blocking ──
+trackPurchase({
+  ref,
+  total:     fullOrder?.total_price || order.total_price || '0',
+  variantId: variantIdInt,
+  quantity:  Math.min(parseInt(quantity) || 1, 10),
+  phone:     cleanPhone,
+  name:      cleanName,
+  eventId:   eventId || ref,
+  fbp,
+  fbc,
+  gaClientId,
+  ttp,
+  ttclid,
+  sourceUrl,
+  ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
+  userAgent: req.headers['user-agent'] || ''
+}).catch(err => console.error('[order] trackPurchase error:', err.message));
 
 return res.status(200).json({
   success:      true,
