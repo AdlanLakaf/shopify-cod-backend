@@ -178,8 +178,8 @@ try {
   console.error('Network error fetching full order:', err);
 }
 
-// ── Server-side conversion tracking — non-blocking ──
-trackPurchase({
+// ── Server-side conversion tracking — awaited so Vercel doesn't cut it off ──
+await trackPurchase({
   ref,
   total:     fullOrder?.total_price || order.total_price || '0',
   variantId: variantIdInt,
