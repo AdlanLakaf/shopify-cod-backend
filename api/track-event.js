@@ -46,7 +46,11 @@ export default async function handler(req, res) {
     sourceUrl       = ''
   } = req.body || {};
 
+  // ── Inbound log so every invocation is identifiable in Vercel logs ──
+  console.log('[track-event] in:', event, '| id:', eventId, '| variant:', variantId, '| value:', value);
+
   if (!ALLOWED_EVENTS.has(event)) {
+    console.warn('[track-event] REJECTED — unsupported event:', JSON.stringify(event));
     return res.status(400).json({ error: 'Unsupported event' });
   }
 
