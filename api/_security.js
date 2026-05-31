@@ -16,24 +16,32 @@ const TIMESTAMP_TTL     = 5 * 60 * 1000;  // request expires after 5 minutes
 const MAX_BODY_BYTES    = 5 * 1024;        // 5KB max payload
 
 // ── 1. CORS — restrict to your Shopify store only ──
-export function setCorsHeaders(req, res) {
+// anyOrigin: true → allow any origin (for cookie-less tracking beacons
+// fired from the sandboxed Shopify Custom Pixel, which runs on a
+// different origin than the storefront).
+export function setCorsHeaders(req, res, { anyOrigin = false } = {}) {
   const SHOP_DOMAIN        = process.env.SHOPIFY_STORE_DOMAIN;   // e.g. handsnose.com
   const SHOP_MYSHOPIFY     = process.env.SHOPIFY_MYSHOPIFY_DOMAIN; // e.g. handsnose.myshopify.com
   const origin             = req.headers.origin || '';
 
-  // All domains that are allowed to call this API
-  const allowedOrigins = [
-    SHOP_DOMAIN        ? `https://${SHOP_DOMAIN}`    : null,  // custom domain
-    SHOP_MYSHOPIFY     ? `https://${SHOP_MYSHOPIFY}` : null,  // myshopify domain
-  ].filter(Boolean);
+  if (anyOrigin) {
+    // Beacon endpoint: no credentials are used, so '*' is safe.
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else {
+    // All domains that are allowed to call this API
+    const allowedOrigins = [
+      SHOP_DOMAIN        ? `https://${SHOP_DOMAIN}`    : null,  // custom domain
+      SHOP_MYSHOPIFY     ? `https://${SHOP_MYSHOPIFY}` : null,  // myshopify domain
+    ].filter(Boolean);
 
-  // Only allow exact store domains — no wildcard myshopify.com
-  const isAllowed = allowedOrigins.length > 0 && allowedOrigins.includes(origin);
+    // Only allow exact store domains — no wildcard myshopify.com
+    const isAllowed = allowedOrigins.length > 0 && allowedOrigins.includes(origin);
 
-  res.setHeader(
-    'Access-Control-Allow-Origin',
-    isAllowed ? origin : (allowedOrigins[0] || '')
-  );
+    res.setHeader(
+      'Access-Control-Allow-Origin',
+      isAllowed ? origin : (allowedOrigins[0] || '')
+    );
+  }
 
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Timestamp, X-Signature');
@@ -173,8 +181,8 @@ export async function verifyTurnstile(req, res) {
 // ── 5. Run all security checks in order ──
 // Returns a response if blocked, null if all checks pass
 // ── 6. Run all security checks in order ──
-export function runSecurityChecks(req, res, { skipHmac = false, skipTurnstile = false } = {}) {
-  setCorsHeaders(req, res);
+export function runSecurityChecks(req, res, { skipHmac = false, skipTurnstile = false, anyOrigin = false } = {}) {
+  setCorsHeaders(req, res, { anyOrigin });
 
   if (req.method === 'OPTIONS') {
     res.status(200).end();

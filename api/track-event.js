@@ -19,7 +19,9 @@ const ALLOWED_EVENTS = new Set([
 ]);
 
 export default async function handler(req, res) {
-  const blocked = runSecurityChecks(req, res, { skipHmac: true });
+  // anyOrigin: the Custom Pixel fires from a sandboxed iframe on a
+  // different origin — this is a cookie-less beacon, so '*' is safe.
+  const blocked = runSecurityChecks(req, res, { skipHmac: true, anyOrigin: true });
   if (blocked) return;
 
   if (req.method !== 'POST') {
