@@ -14,6 +14,12 @@
 
 import crypto from 'crypto';
 
+// ── Test mode ──────────────────────────────────────────────────
+// Set these in Vercel to route events to the platform "Test Events" tab.
+// Leave UNSET in production (otherwise events only count as test traffic).
+const META_TEST_EVENT_CODE   = process.env.META_TEST_EVENT_CODE   || '';
+const TIKTOK_TEST_EVENT_CODE = process.env.TIKTOK_TEST_EVENT_CODE || '';
+
 // ── Utilities ─────────────────────────────────────────────────
 
 const sha256 = str =>
@@ -163,10 +169,13 @@ async function trackMeta({ ref, total, variantId, quantity, productTitle, conten
   // Enhanced Conversions — gclid for Google Ads cross-attribution
   if (gclid) eventPayload.referrer_url = sourceUrl || '';
 
+  const body = { data: [eventPayload] };
+  if (META_TEST_EVENT_CODE) body.test_event_code = META_TEST_EVENT_CODE;
+
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data: [eventPayload] })
+    body: JSON.stringify(body)
   });
 
   if (!res.ok) throw new Error(`Meta CAPI ${res.status}: ${await res.text().catch(() => '')}`);
@@ -197,6 +206,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, phon
       pixel_code:      PIXEL_ID,
       event_source:    'web',
       event_source_id: PIXEL_ID,
+      test_event_code: TIKTOK_TEST_EVENT_CODE || undefined,
       data: [{
         event:      'Purchase', // TikTok's current purchase event (PlaceAnOrder soft-deprecated, sunset 2027)
         event_time: Math.floor(Date.now() / 1000),
@@ -260,20 +270,23 @@ async function trackMetaEvent({ eventName, value, variantId, quantity, productTi
   if (contentCategory) customData.content_category = contentCategory;
   if (eventName === 'Search' && searchString) customData.search_string = searchString;
 
+  const body = {
+    data: [{
+      event_name:       eventName,
+      event_time:       Math.floor(Date.now() / 1000),
+      event_id:         eventId || undefined, // matches the browser pixel's eventID → de-dupe
+      event_source_url: sourceUrl || '',
+      action_source:    'website',
+      user_data:        userData,
+      custom_data:      customData
+    }]
+  };
+  if (META_TEST_EVENT_CODE) body.test_event_code = META_TEST_EVENT_CODE;
+
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      data: [{
-        event_name:       eventName,
-        event_time:       Math.floor(Date.now() / 1000),
-        event_id:         eventId || undefined, // matches the browser pixel's eventID → de-dupe
-        event_source_url: sourceUrl || '',
-        action_source:    'website',
-        user_data:        userData,
-        custom_data:      customData
-      }]
-    })
+    body: JSON.stringify(body)
   });
 
   if (!res.ok) throw new Error(`Meta CAPI ${res.status}: ${await res.text().catch(() => '')}`);
@@ -304,6 +317,7 @@ async function trackTikTokEvent({ eventName, value, variantId, quantity, product
       pixel_code:      PIXEL_ID,
       event_source:    'web',
       event_source_id: PIXEL_ID,
+      test_event_code: TIKTOK_TEST_EVENT_CODE || undefined,
       data: [{
         event:      eventName,
         event_time: Math.floor(Date.now() / 1000),
