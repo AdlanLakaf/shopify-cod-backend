@@ -45,6 +45,7 @@ export default async function handler(req, res) {
     fbc             = '',
     ttp             = '',
     ttclid          = '',
+    externalId      = '',
     sourceUrl       = ''
   } = req.body || {};
 
@@ -74,6 +75,7 @@ export default async function handler(req, res) {
     fbc,
     ttp,
     ttclid,
+    externalId,
     sourceUrl,
     ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
     userAgent: req.headers['user-agent'] || ''

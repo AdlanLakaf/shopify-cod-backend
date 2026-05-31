@@ -38,18 +38,20 @@ function toE164DZ(phone) {
 // ── Shared identity builders ───────────────────────────────────
 // PII is optional — mid-funnel events may not have a phone/name yet.
 
-function buildMetaUserData({ phone, name, city, state, fbp, fbc, ip, userAgent }) {
+function buildMetaUserData({ phone, name, city, state, fbp, fbc, externalId, ip, userAgent }) {
   const userData = {
     client_ip_address: ip        || '',
     client_user_agent: userAgent || '',
     country:           [sha256('dz')]
   };
 
+  // ── external_id = persistent first-party visitor id (raw, matches browser
+  //    fbq advanced matching). Present on EVERY event, even with no PII —
+  //    this is the main match-quality lever for ViewContent/Search. ──
+  if (externalId) userData.external_id = [String(externalId)];
+
   const e164 = toE164DZ(phone);
-  if (e164) {
-    userData.ph          = [sha256(e164)];
-    userData.external_id = [sha256(e164)]; // stable customer key — lifts Event Match Quality
-  }
+  if (e164) userData.ph = [sha256(e164)];
 
   if (name) {
     const parts = name.trim().split(/\s+/);
@@ -122,7 +124,7 @@ async function trackGA4({ ref, total, unitPrice, variantId, quantity, productTit
 }
 
 // ── Meta Conversions API — Purchase ─────────────────────────────
-async function trackMeta({ ref, total, variantId, quantity, productTitle, contentCategory, phone, name, city, state, fbp, fbc, gclid, eventId, sourceUrl, ip, userAgent }) {
+async function trackMeta({ ref, total, variantId, quantity, productTitle, contentCategory, phone, name, city, state, fbp, fbc, externalId, gclid, eventId, sourceUrl, ip, userAgent }) {
   const PIXEL_ID     = process.env.META_PIXEL_ID;
   const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 
@@ -133,7 +135,7 @@ async function trackMeta({ ref, total, variantId, quantity, productTitle, conten
 
   const url = `https://graph.facebook.com/v19.0/${PIXEL_ID}/events?access_token=${ACCESS_TOKEN}`;
 
-  const userData = buildMetaUserData({ phone, name, city, state, fbp, fbc, ip, userAgent });
+  const userData = buildMetaUserData({ phone, name, city, state, fbp, fbc, externalId, ip, userAgent });
 
   const qty       = parseInt(quantity) || 1;
   const unitValue = (parseFloat(total) || 0) / qty;
@@ -235,7 +237,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, phon
 }
 
 // ── Meta Conversions API — generic funnel event ─────────────────
-async function trackMetaEvent({ eventName, value, variantId, quantity, productTitle, contentCategory, searchString, phone, name, city, state, fbp, fbc, eventId, sourceUrl, ip, userAgent }) {
+async function trackMetaEvent({ eventName, value, variantId, quantity, productTitle, contentCategory, searchString, phone, name, city, state, fbp, fbc, externalId, eventId, sourceUrl, ip, userAgent }) {
   const PIXEL_ID     = process.env.META_PIXEL_ID;
   const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 
@@ -246,7 +248,7 @@ async function trackMetaEvent({ eventName, value, variantId, quantity, productTi
 
   const url = `https://graph.facebook.com/v19.0/${PIXEL_ID}/events?access_token=${ACCESS_TOKEN}`;
 
-  const userData = buildMetaUserData({ phone, name, city, state, fbp, fbc, ip, userAgent });
+  const userData = buildMetaUserData({ phone, name, city, state, fbp, fbc, externalId, ip, userAgent });
 
   const qty = parseInt(quantity) || 1;
   const val = parseFloat(value) || 0;
