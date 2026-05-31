@@ -1,7 +1,15 @@
 // ============================================================
 //  Server-Side Conversion Tracking
-//  Fires Purchase to GA4, Meta CAPI, TikTok Events API
-//  Follows the full pixelData schema with hashed PII
+//  Purchase  → GA4 (MP) + Meta CAPI + TikTok Events API
+//  Funnel    → Meta CAPI + TikTok Events API (ViewContent,
+//              InitiateCheckout, AddPaymentInfo)
+//  Follows the full pixelData schema with hashed PII.
+//
+//  NOTE: mid-funnel events are NOT sent to GA4 server-side —
+//  GA4 only de-dupes purchases (by transaction_id), so a
+//  server copy of view_item/begin_checkout would double-count.
+//  Those stay client-side. Meta & TikTok de-dupe every event
+//  by event_id, so we send them both browser + server.
 // ============================================================
 
 import crypto from 'crypto';
@@ -21,7 +29,51 @@ function toE164DZ(phone) {
   return digits;
 }
 
-// ── GA4 Measurement Protocol ───────────────────────────────────
+// ── Shared identity builders ───────────────────────────────────
+// PII is optional — mid-funnel events may not have a phone/name yet.
+
+function buildMetaUserData({ phone, name, city, state, fbp, fbc, ip, userAgent }) {
+  const userData = {
+    client_ip_address: ip        || '',
+    client_user_agent: userAgent || '',
+    country:           [sha256('dz')]
+  };
+
+  const e164 = toE164DZ(phone);
+  if (e164) {
+    userData.ph          = [sha256(e164)];
+    userData.external_id = [sha256(e164)]; // stable customer key — lifts Event Match Quality
+  }
+
+  if (name) {
+    const parts = name.trim().split(/\s+/);
+    userData.fn = [sha256(parts[0])];
+    if (parts.length > 1) userData.ln = [sha256(parts.slice(1).join(' '))];
+  }
+
+  if (city)  userData.ct  = [sha256(city)];
+  if (state) userData.st  = [sha256(state)];
+  if (fbp)   userData.fbp = fbp;
+  if (fbc)   userData.fbc = fbc;
+
+  return userData;
+}
+
+function buildTikTokUser({ phone, ttp, ttclid, ip, userAgent }) {
+  const user = {
+    ip:         ip        || '',
+    user_agent: userAgent || ''
+  };
+
+  const e164 = toE164DZ(phone);
+  if (e164)   user.phone  = sha256(e164);
+  if (ttp)    user.ttp    = ttp;
+  if (ttclid) user.ttclid = ttclid;
+
+  return user;
+}
+
+// ── GA4 Measurement Protocol (purchase only) ───────────────────
 async function trackGA4({ ref, total, unitPrice, variantId, quantity, productTitle, gaClientId, sessionId }) {
   const MEASUREMENT_ID = process.env.GA4_MEASUREMENT_ID;
   const API_SECRET     = process.env.GA4_API_SECRET;
@@ -37,6 +89,8 @@ async function trackGA4({ ref, total, unitPrice, variantId, quantity, productTit
     transaction_id: ref,
     value:          parseFloat(total) || 0,
     currency:       'DZD',
+    // ── Required by MP so the purchase shows in Realtime/engagement reports ──
+    engagement_time_msec: 100,
     items: [{
       item_id:   String(variantId),
       item_name: productTitle || '',
@@ -45,6 +99,7 @@ async function trackGA4({ ref, total, unitPrice, variantId, quantity, productTit
     }]
   };
 
+  // ── session_id ties the server event to the user's GA4 session (attribution) ──
   if (sessionId) params.session_id = sessionId;
 
   const res = await fetch(url, {
@@ -60,7 +115,7 @@ async function trackGA4({ ref, total, unitPrice, variantId, quantity, productTit
   console.log('[tracking:ga4] purchase fired — ref:', ref);
 }
 
-// ── Meta Conversions API ────────────────────────────────────────
+// ── Meta Conversions API — Purchase ─────────────────────────────
 async function trackMeta({ ref, total, variantId, quantity, productTitle, contentCategory, phone, name, city, state, fbp, fbc, gclid, eventId, sourceUrl, ip, userAgent }) {
   const PIXEL_ID     = process.env.META_PIXEL_ID;
   const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
@@ -72,26 +127,10 @@ async function trackMeta({ ref, total, variantId, quantity, productTitle, conten
 
   const url = `https://graph.facebook.com/v19.0/${PIXEL_ID}/events?access_token=${ACCESS_TOKEN}`;
 
-  // ── Hash all PII ──
-  const userData = {
-    client_ip_address: ip        || '',
-    client_user_agent: userAgent || '',
-    country:           [sha256('dz')]
-  };
+  const userData = buildMetaUserData({ phone, name, city, state, fbp, fbc, ip, userAgent });
 
-  const e164 = toE164DZ(phone);
-  if (e164)  userData.ph = [sha256(e164)];
-
-  if (name) {
-    const parts = name.trim().split(/\s+/);
-    userData.fn = [sha256(parts[0])];
-    if (parts.length > 1) userData.ln = [sha256(parts.slice(1).join(' '))];
-  }
-
-  if (city)  userData.ct = [sha256(city)];
-  if (state) userData.st = [sha256(state)];
-  if (fbp)   userData.fbp = fbp;
-  if (fbc)   userData.fbc = fbc;
+  const qty       = parseInt(quantity) || 1;
+  const unitValue = (parseFloat(total) || 0) / qty;
 
   const customData = {
     value:        parseFloat(total) || 0,
@@ -99,7 +138,13 @@ async function trackMeta({ ref, total, variantId, quantity, productTitle, conten
     order_id:     ref,
     content_ids:  [String(variantId)],
     content_type: 'product',
-    num_items:    parseInt(quantity) || 1
+    num_items:    qty,
+    // ── contents array — per-item detail improves catalog matching ──
+    contents: [{
+      id:          String(variantId),
+      quantity:    qty,
+      item_price:  Number(unitValue.toFixed(2))
+    }]
   };
 
   if (productTitle)    customData.content_name     = productTitle;
@@ -129,7 +174,7 @@ async function trackMeta({ ref, total, variantId, quantity, productTitle, conten
   console.log('[tracking:meta] purchase fired — events_received:', json.events_received, '— ref:', ref);
 }
 
-// ── TikTok Events API ───────────────────────────────────────────
+// ── TikTok Events API — Purchase ────────────────────────────────
 async function trackTikTok({ ref, total, variantId, quantity, productTitle, phone, ttp, ttclid, eventId, sourceUrl, ip, userAgent }) {
   const PIXEL_ID     = process.env.TIKTOK_PIXEL_ID;
   const ACCESS_TOKEN = process.env.TIKTOK_ACCESS_TOKEN;
@@ -139,17 +184,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, phon
     return;
   }
 
-  const e164 = toE164DZ(phone);
-
-  const user = {
-    ip:         ip        || '',
-    user_agent: userAgent || '',
-  };
-
-  if (e164)   user.phone  = sha256(e164);
-  if (ttp)    user.ttp    = ttp;
-  if (ttclid) user.ttclid = ttclid;
-
+  const user  = buildTikTokUser({ phone, ttp, ttclid, ip, userAgent });
   const price = parseFloat(total) || 0;
 
   const res = await fetch('https://business-api.tiktok.com/open_api/v1.3/event/track/', {
@@ -163,7 +198,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, phon
       event_source:    'web',
       event_source_id: PIXEL_ID,
       data: [{
-        event:      'PlaceAnOrder',
+        event:      'Purchase', // TikTok's current purchase event (PlaceAnOrder soft-deprecated, sunset 2027)
         event_time: Math.floor(Date.now() / 1000),
         event_id:   eventId || ref,
         user,
@@ -189,7 +224,114 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, phon
   console.log('[tracking:tiktok] purchase fired — code:', json.code, '— ref:', ref);
 }
 
-// ── Main export ─────────────────────────────────────────────────
+// ── Meta Conversions API — generic funnel event ─────────────────
+async function trackMetaEvent({ eventName, value, variantId, quantity, productTitle, contentCategory, phone, name, city, state, fbp, fbc, eventId, sourceUrl, ip, userAgent }) {
+  const PIXEL_ID     = process.env.META_PIXEL_ID;
+  const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+
+  if (!PIXEL_ID || !ACCESS_TOKEN) {
+    console.warn('[tracking:meta] credentials not set — skipping', eventName);
+    return;
+  }
+
+  const url = `https://graph.facebook.com/v19.0/${PIXEL_ID}/events?access_token=${ACCESS_TOKEN}`;
+
+  const userData = buildMetaUserData({ phone, name, city, state, fbp, fbc, ip, userAgent });
+
+  const qty = parseInt(quantity) || 1;
+  const val = parseFloat(value) || 0;
+
+  const customData = {
+    value:        val,
+    currency:     'DZD',
+    content_ids:  variantId ? [String(variantId)] : [],
+    content_type: 'product',
+    num_items:    qty
+  };
+
+  if (variantId) {
+    customData.contents = [{
+      id:         String(variantId),
+      quantity:   qty,
+      item_price: qty ? Number((val / qty).toFixed(2)) : val
+    }];
+  }
+  if (productTitle)    customData.content_name     = productTitle;
+  if (contentCategory) customData.content_category = contentCategory;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      data: [{
+        event_name:       eventName,
+        event_time:       Math.floor(Date.now() / 1000),
+        event_id:         eventId || undefined, // matches the browser pixel's eventID → de-dupe
+        event_source_url: sourceUrl || '',
+        action_source:    'website',
+        user_data:        userData,
+        custom_data:      customData
+      }]
+    })
+  });
+
+  if (!res.ok) throw new Error(`Meta CAPI ${res.status}: ${await res.text().catch(() => '')}`);
+  const json = await res.json().catch(() => ({}));
+  console.log(`[tracking:meta] ${eventName} fired — events_received:`, json.events_received);
+}
+
+// ── TikTok Events API — generic funnel event ────────────────────
+async function trackTikTokEvent({ eventName, value, variantId, quantity, productTitle, phone, ttp, ttclid, eventId, sourceUrl, ip, userAgent }) {
+  const PIXEL_ID     = process.env.TIKTOK_PIXEL_ID;
+  const ACCESS_TOKEN = process.env.TIKTOK_ACCESS_TOKEN;
+
+  if (!PIXEL_ID || !ACCESS_TOKEN) {
+    console.warn('[tracking:tiktok] credentials not set — skipping', eventName);
+    return;
+  }
+
+  const user = buildTikTokUser({ phone, ttp, ttclid, ip, userAgent });
+  const val  = parseFloat(value) || 0;
+
+  const res = await fetch('https://business-api.tiktok.com/open_api/v1.3/event/track/', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Token': ACCESS_TOKEN
+    },
+    body: JSON.stringify({
+      pixel_code:      PIXEL_ID,
+      event_source:    'web',
+      event_source_id: PIXEL_ID,
+      data: [{
+        event:      eventName,
+        event_time: Math.floor(Date.now() / 1000),
+        event_id:   eventId || undefined, // matches the browser pixel's event_id → de-dupe
+        user,
+        page: { url: sourceUrl || '' },
+        properties: {
+          currency: 'DZD',
+          value:    val,
+          contents: variantId ? [{
+            content_id:   String(variantId),
+            content_type: 'product',
+            content_name: productTitle || '',
+            quantity:     parseInt(quantity) || 1,
+            price:        (parseInt(quantity) || 1) ? Number((val / (parseInt(quantity) || 1)).toFixed(2)) : val
+          }] : []
+        }
+      }]
+    })
+  });
+
+  if (!res.ok) throw new Error(`TikTok API ${res.status}: ${await res.text().catch(() => '')}`);
+  const json = await res.json().catch(() => ({}));
+  console.log(`[tracking:tiktok] ${eventName} fired — code:`, json.code);
+}
+
+// ── Public exports ──────────────────────────────────────────────
+
+// Purchase — fired from create-order.js (GA4 + Meta + TikTok)
 export async function trackPurchase(data) {
   const results = await Promise.allSettled([
     trackGA4(data),
@@ -201,6 +343,21 @@ export async function trackPurchase(data) {
     const platform = ['GA4', 'Meta CAPI', 'TikTok'][i];
     if (r.status === 'rejected') {
       console.error(`[tracking:${platform.toLowerCase()}] failed:`, r.reason?.message || r.reason);
+    }
+  });
+}
+
+// Funnel event — fired from track-event.js (Meta + TikTok only)
+export async function trackEvent(data) {
+  const results = await Promise.allSettled([
+    trackMetaEvent(data),
+    trackTikTokEvent(data),
+  ]);
+
+  results.forEach((r, i) => {
+    const platform = ['Meta CAPI', 'TikTok'][i];
+    if (r.status === 'rejected') {
+      console.error(`[tracking:${platform.toLowerCase()}] ${data.eventName} failed:`, r.reason?.message || r.reason);
     }
   });
 }
