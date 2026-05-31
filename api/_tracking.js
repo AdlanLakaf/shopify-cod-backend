@@ -225,7 +225,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, phon
 }
 
 // ── Meta Conversions API — generic funnel event ─────────────────
-async function trackMetaEvent({ eventName, value, variantId, quantity, productTitle, contentCategory, phone, name, city, state, fbp, fbc, eventId, sourceUrl, ip, userAgent }) {
+async function trackMetaEvent({ eventName, value, variantId, quantity, productTitle, contentCategory, searchString, phone, name, city, state, fbp, fbc, eventId, sourceUrl, ip, userAgent }) {
   const PIXEL_ID     = process.env.META_PIXEL_ID;
   const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 
@@ -258,6 +258,7 @@ async function trackMetaEvent({ eventName, value, variantId, quantity, productTi
   }
   if (productTitle)    customData.content_name     = productTitle;
   if (contentCategory) customData.content_category = contentCategory;
+  if (eventName === 'Search' && searchString) customData.search_string = searchString;
 
   const res = await fetch(url, {
     method: 'POST',
@@ -281,7 +282,7 @@ async function trackMetaEvent({ eventName, value, variantId, quantity, productTi
 }
 
 // ── TikTok Events API — generic funnel event ────────────────────
-async function trackTikTokEvent({ eventName, value, variantId, quantity, productTitle, phone, ttp, ttclid, eventId, sourceUrl, ip, userAgent }) {
+async function trackTikTokEvent({ eventName, value, variantId, quantity, productTitle, searchString, phone, ttp, ttclid, eventId, sourceUrl, ip, userAgent }) {
   const PIXEL_ID     = process.env.TIKTOK_PIXEL_ID;
   const ACCESS_TOKEN = process.env.TIKTOK_ACCESS_TOKEN;
 
@@ -309,7 +310,7 @@ async function trackTikTokEvent({ eventName, value, variantId, quantity, product
         event_id:   eventId || undefined, // matches the browser pixel's event_id → de-dupe
         user,
         page: { url: sourceUrl || '' },
-        properties: {
+        properties: Object.assign({
           currency: 'DZD',
           value:    val,
           contents: variantId ? [{
@@ -319,7 +320,7 @@ async function trackTikTokEvent({ eventName, value, variantId, quantity, product
             quantity:     parseInt(quantity) || 1,
             price:        (parseInt(quantity) || 1) ? Number((val / (parseInt(quantity) || 1)).toFixed(2)) : val
           }] : []
-        }
+        }, (eventName === 'Search' && searchString) ? { query: searchString } : {})
       }]
     })
   });
@@ -347,17 +348,22 @@ export async function trackPurchase(data) {
   });
 }
 
-// Funnel event — fired from track-event.js (Meta + TikTok only)
-export async function trackEvent(data) {
-  const results = await Promise.allSettled([
-    trackMetaEvent(data),
-    trackTikTokEvent(data),
-  ]);
+// Events TikTok has no standard equivalent for — send to Meta only
+const META_ONLY = new Set(['FindLocation']);
 
+// Funnel event — fired from track-event.js (Meta + TikTok)
+export async function trackEvent(data) {
+  const tasks     = [trackMetaEvent(data)];
+  const platforms = ['Meta CAPI'];
+  if (!META_ONLY.has(data.eventName)) {
+    tasks.push(trackTikTokEvent(data));
+    platforms.push('TikTok');
+  }
+
+  const results = await Promise.allSettled(tasks);
   results.forEach((r, i) => {
-    const platform = ['Meta CAPI', 'TikTok'][i];
     if (r.status === 'rejected') {
-      console.error(`[tracking:${platform.toLowerCase()}] ${data.eventName} failed:`, r.reason?.message || r.reason);
+      console.error(`[tracking:${platforms[i].toLowerCase()}] ${data.eventName} failed:`, r.reason?.message || r.reason);
     }
   });
 }

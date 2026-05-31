@@ -14,7 +14,9 @@ import { runSecurityChecks } from './_security.js';
 import { trackEvent } from './_tracking.js';
 
 // Only these standard events may be relayed
-const ALLOWED_EVENTS = new Set(['ViewContent', 'InitiateCheckout', 'AddPaymentInfo']);
+const ALLOWED_EVENTS = new Set([
+  'ViewContent', 'InitiateCheckout', 'AddPaymentInfo', 'Search', 'FindLocation'
+]);
 
 export default async function handler(req, res) {
   const blocked = runSecurityChecks(req, res, { skipHmac: true });
@@ -32,6 +34,7 @@ export default async function handler(req, res) {
     value           = 0,
     productTitle    = '',
     contentCategory = '',
+    searchString    = '',
     phone           = '',
     name            = '',
     city            = '',
@@ -56,6 +59,7 @@ export default async function handler(req, res) {
     quantity,
     productTitle,
     contentCategory,
+    searchString,
     phone,
     name,
     city,
