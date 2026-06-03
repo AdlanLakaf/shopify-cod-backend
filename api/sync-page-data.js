@@ -11,7 +11,7 @@
 //    SHOPIFY_THEME_ID   ← numeric ID of the live theme
 // ============================================================
 
-import { fetchWithTimeout } from './_security.js';
+import { fetchWithTimeout, log } from './_security.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join }  from 'path';
@@ -39,6 +39,9 @@ function normaliseRates(raw) {
   for (const territory of (raw.rates || [])) {
     const code = territory.toTerritoryCode;
     if (!code) continue;
+    // Normalize to integer string — ZR Express may return "04" (leading zero)
+    const key = String(parseInt(String(code), 10));
+    if (key === 'NaN') continue;
     const entry = { home: null, desk: null };
     for (const dp of (territory.deliveryPrices || [])) {
       const type  = (dp.deliveryType || '').toLowerCase();
@@ -50,7 +53,7 @@ function normaliseRates(raw) {
         else if (entry.desk === null) entry.desk = price;
       }
     }
-    map[String(code)] = entry;
+    map[key] = entry;
   }
   return map;
 }
@@ -148,7 +151,7 @@ export async function syncPageData() {
     throw new Error('Static data files (wilayas.json / communes.json) not loaded');
   }
 
-  console.log('[sync-page-data] Fetching ZR Express rates + hubs...');
+  log('[sync-page-data] Fetching ZR Express rates + hubs...');
   const [rawRates, hubs] = await Promise.all([
     fetchRates(tenant, apiKey),
     fetchHubs(tenant, apiKey)
@@ -158,7 +161,7 @@ export async function syncPageData() {
   const wilayas = buildWilayaMap(rates, hubs);
   const payload = JSON.stringify({ wilayas, generatedAt: Date.now() });
 
-  console.log(`[sync-page-data] Built map for ${Object.keys(wilayas).length} wilayas. Uploading to Shopify...`);
+  log(`[sync-page-data] Built map for ${Object.keys(wilayas).length} wilayas. Uploading to Shopify...`);
 
   const uploadRes = await fetchWithTimeout(
     `https://${SHOP}/admin/api/${SHOPIFY_API_VER}/themes/${THEME_ID}/assets.json`,
@@ -174,6 +177,6 @@ export async function syncPageData() {
     throw new Error(`Shopify asset upload failed HTTP ${uploadRes.status}`);
   }
 
-  console.log('[sync-page-data] Done — page-data.json updated on Shopify CDN');
+  log('[sync-page-data] Done — page-data.json updated on Shopify CDN');
   return wilayas;
 }

@@ -5,7 +5,7 @@
 //  Security: HMAC + timestamp + rate limiting + origin check
 // ============================================================
 
-import { runSecurityChecks, verifyTurnstile, fetchWithTimeout } from './_security.js';
+import { runSecurityChecks, verifyTurnstile, fetchWithTimeout, log } from './_security.js';
 import { trackPurchase } from './_tracking.js';
 
 export default async function handler(req, res) {
@@ -140,7 +140,7 @@ export default async function handler(req, res) {
     }
     const draftData = await draftRes.json();
     draftId = draftData.draft_order.id;
-    console.log('Draft order created:', draftId);
+    log('Draft order created:', draftId);
   } catch (err) {
     console.error('Network error creating draft:', err);
     return res.status(500).json({ error: 'Network error' });
@@ -162,7 +162,7 @@ export default async function handler(req, res) {
 
     const completeData = await completeRes.json();
     const order        = completeData.draft_order;
-    console.log('Order completed:', order.order_id);
+    log('Order completed:', order.order_id);
 
    // ── Fetch full order to get line_items ──
 let fullOrder = null;

@@ -45,6 +45,10 @@ function normaliseRates(raw) {
   for (const territory of (raw.rates || [])) {
     const code = territory.toTerritoryCode;
     if (!code) continue;
+    // Normalize to integer string — ZR Express may return "04" (leading zero)
+    // but wilaya keys in buildWilayaMap use String(parseInt(...)) = "4"
+    const key = String(parseInt(String(code), 10));
+    if (key === 'NaN') continue;
     const entry = { home: null, desk: null };
     for (const dp of (territory.deliveryPrices || [])) {
       const type  = (dp.deliveryType || '').toLowerCase();
@@ -58,7 +62,7 @@ function normaliseRates(raw) {
         else if (entry.desk === null) entry.desk = price;
       }
     }
-    map[String(code)] = entry;
+    map[key] = entry;
   }
   return map;
 }

@@ -65,7 +65,8 @@ function normalise(raw) {
       }
     }
 
-    rates[String(code)] = entry;
+    const _rKey = String(parseInt(String(code), 10));
+    if (_rKey !== 'NaN') rates[_rKey] = entry;
   }
 
   return rates;

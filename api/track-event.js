@@ -10,7 +10,7 @@
 //  GA4 is intentionally NOT called here (no mid-funnel dedup).
 // ============================================================
 
-import { runSecurityChecks } from './_security.js';
+import { runSecurityChecks, log } from './_security.js';
 import { trackEvent } from './_tracking.js';
 
 // Only these standard events may be relayed
@@ -50,7 +50,7 @@ export default async function handler(req, res) {
   } = req.body || {};
 
   // ── Inbound log so every invocation is identifiable in Vercel logs ──
-  console.log('[track-event] in:', event, '| id:', eventId, '| variant:', variantId, '| value:', value);
+  log('[track-event] in:', event, '| id:', eventId, '| variant:', variantId, '| value:', value);
 
   if (!ALLOWED_EVENTS.has(event)) {
     console.warn('[track-event] REJECTED — unsupported event:', JSON.stringify(event));

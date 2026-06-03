@@ -4,6 +4,10 @@
 
 import crypto from 'crypto';
 
+// ── Logging — verbose only in TEST_MODE=true, errors always logged ────────────
+export const TEST_MODE = process.env.TEST_MODE === 'true';
+export const log = (...args) => { if (TEST_MODE) console.log(...args); };
+
 // ── Shared fetch-with-timeout helper ─────────────────────────────────────────
 export async function fetchWithTimeout(url, options = {}, timeoutMs = 10_000) {
   const ctrl  = new AbortController();

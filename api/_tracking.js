@@ -5,7 +5,7 @@
 // ============================================================
 
 import crypto from 'crypto';
-import { fetchWithTimeout } from './_security.js';
+import { fetchWithTimeout, log } from './_security.js';
 
 const META_TEST_EVENT_CODE   = process.env.META_TEST_EVENT_CODE   || '';
 const TIKTOK_TEST_EVENT_CODE = process.env.TIKTOK_TEST_EVENT_CODE || '';
@@ -76,7 +76,7 @@ async function trackGA4({ ref, total, unitPrice, variantId, quantity, productTit
   if (sessionId) params.session_id = sessionId;
 
   const clientId = gaClientId || ('server.' + Date.now());
-  console.log(`${tag} firing — ref:${ref} value:${params.value} DZD`);
+  log(`${tag} firing — ref:${ref} value:${params.value} DZD`);
 
   const res = await fetchWithTimeout(
     `https://www.google-analytics.com/mp/collect?measurement_id=${MEASUREMENT_ID}&api_secret=${API_SECRET}`,
@@ -85,7 +85,7 @@ async function trackGA4({ ref, total, unitPrice, variantId, quantity, productTit
   );
 
   if (!res.ok) throw new Error(`GA4 MP HTTP ${res.status}`);
-  console.log(`${tag} OK — HTTP ${res.status}`);
+  log(`${tag} OK — HTTP ${res.status}`);
 }
 
 // ── Meta CAPI — Purchase ──────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ async function trackMeta({ ref, total, variantId, quantity, productTitle, conten
   const body = { data: [eventPayload] };
   if (META_TEST_EVENT_CODE) body.test_event_code = META_TEST_EVENT_CODE;
 
-  console.log(`${tag} firing — ref:${ref} value:${customData.value} DZD ip:${maskIp(ip)}`);
+  log(`${tag} firing — ref:${ref} value:${customData.value} DZD ip:${maskIp(ip)}`);
 
   const res  = await fetchWithTimeout(
     `https://graph.facebook.com/v19.0/${PIXEL_ID}/events?access_token=${ACCESS_TOKEN}`,
@@ -131,7 +131,7 @@ async function trackMeta({ ref, total, variantId, quantity, productTitle, conten
   const json = await res.json().catch(() => ({}));
 
   if (!res.ok) throw new Error(`Meta CAPI HTTP ${res.status}`);
-  console.log(`${tag} OK — events_received:${json.events_received}`);
+  log(`${tag} OK — events_received:${json.events_received}`);
 }
 
 // ── TikTok Events API — Purchase ─────────────────────────────────────────────
@@ -148,7 +148,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, phon
   const user  = buildTikTokUser({ phone, ttp, ttclid, ip, userAgent });
   const price = parseFloat(total) || 0;
 
-  console.log(`${tag} firing — ref:${ref} value:${price} DZD ip:${maskIp(ip)}`);
+  log(`${tag} firing — ref:${ref} value:${price} DZD ip:${maskIp(ip)}`);
 
   const res  = await fetchWithTimeout('https://business-api.tiktok.com/open_api/v1.3/event/track/', {
     method: 'POST',
@@ -168,7 +168,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, phon
 
   if (!res.ok) throw new Error(`TikTok API HTTP ${res.status}`);
   if (json.code !== 0) throw new Error(`TikTok API error code ${json.code}: ${json.message}`);
-  console.log(`${tag} OK — code:${json.code}`);
+  log(`${tag} OK — code:${json.code}`);
 }
 
 // ── Meta CAPI — Funnel event ──────────────────────────────────────────────────
@@ -206,7 +206,7 @@ async function trackMetaEvent({ eventName, value, variantId, quantity, productTi
   const json = await res.json().catch(() => ({}));
 
   if (!res.ok) throw new Error(`Meta CAPI HTTP ${res.status}`);
-  console.log(`${tag} OK — events_received:${json.events_received}`);
+  log(`${tag} OK — events_received:${json.events_received}`);
 }
 
 // ── TikTok Events API — Funnel event ─────────────────────────────────────────
@@ -247,13 +247,13 @@ async function trackTikTokEvent({ eventName, value, variantId, quantity, product
 
   if (!res.ok) throw new Error(`TikTok API HTTP ${res.status}`);
   if (json.code !== 0) throw new Error(`TikTok API error code ${json.code}: ${json.message}`);
-  console.log(`${tag} OK — code:${json.code}`);
+  log(`${tag} OK — code:${json.code}`);
 }
 
 // ── Public exports ────────────────────────────────────────────────────────────
 
 export async function trackPurchase(data) {
-  console.log(`[tracking] Purchase — ref:${data.ref} GA4:${!!(process.env.GA4_MEASUREMENT_ID && process.env.GA4_API_SECRET)} Meta:${!!(process.env.META_PIXEL_ID && process.env.META_ACCESS_TOKEN)} TikTok:${!!(process.env.TIKTOK_PIXEL_ID && process.env.TIKTOK_ACCESS_TOKEN)}`);
+  log(`[tracking] Purchase — ref:${data.ref} GA4:${!!(process.env.GA4_MEASUREMENT_ID && process.env.GA4_API_SECRET)} Meta:${!!(process.env.META_PIXEL_ID && process.env.META_ACCESS_TOKEN)} TikTok:${!!(process.env.TIKTOK_PIXEL_ID && process.env.TIKTOK_ACCESS_TOKEN)}`);
   const results = await Promise.allSettled([ trackGA4(data), trackMeta(data), trackTikTok(data) ]);
   results.forEach((r, i) => {
     if (r.status === 'rejected')
@@ -264,7 +264,7 @@ export async function trackPurchase(data) {
 const META_ONLY = new Set(['FindLocation']);
 
 export async function trackEvent(data) {
-  console.log(`[tracking] ${data.eventName} — Meta:${!!(process.env.META_PIXEL_ID && process.env.META_ACCESS_TOKEN)} TikTok:${!!(process.env.TIKTOK_PIXEL_ID && process.env.TIKTOK_ACCESS_TOKEN)}`);
+  log(`[tracking] ${data.eventName} — Meta:${!!(process.env.META_PIXEL_ID && process.env.META_ACCESS_TOKEN)} TikTok:${!!(process.env.TIKTOK_PIXEL_ID && process.env.TIKTOK_ACCESS_TOKEN)}`);
   const tasks     = [trackMetaEvent(data)];
   const platforms = ['Meta'];
   if (!META_ONLY.has(data.eventName)) { tasks.push(trackTikTokEvent(data)); platforms.push('TikTok'); }
