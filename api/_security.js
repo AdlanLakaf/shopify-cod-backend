@@ -1,46 +1,58 @@
 // ============================================================
 //  Security middleware — shared by all API functions
-//  Provides: HMAC verification, timestamp check,
-//            rate limiting, origin check, payload size limit
 // ============================================================
 
 import crypto from 'crypto';
 
-// ── In-memory rate limit store ──
-// Key: IP address  Value: { count, windowStart }
+// ── Shared fetch-with-timeout helper ─────────────────────────────────────────
+export async function fetchWithTimeout(url, options = {}, timeoutMs = 10_000) {
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs}ms: ${url}`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ── Rate limit store ──────────────────────────────────────────────────────────
 const rateLimitStore = new Map();
 
-const RATE_LIMIT_MAX    = 30;     // max requests per window
-const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in ms
-const TIMESTAMP_TTL     = 5 * 60 * 1000;  // request expires after 5 minutes
-const MAX_BODY_BYTES    = 5 * 1024;        // 5KB max payload
+const RATE_LIMIT_MAX    = 30;
+const RATE_LIMIT_WINDOW = 5 * 60 * 1000;
+const TIMESTAMP_TTL     = 5 * 60 * 1000;
+const MAX_BODY_BYTES    = 5 * 1024;
 
-// ── 1. CORS — restrict to your Shopify store only ──
-// anyOrigin: true → allow any origin (for cookie-less tracking beacons
-// fired from the sandboxed Shopify Custom Pixel, which runs on a
-// different origin than the storefront).
+// Purge expired entries every 10 minutes — prevents unbounded memory growth
+setInterval(() => {
+  const cutoff = Date.now() - RATE_LIMIT_WINDOW * 2;
+  for (const [ip, entry] of rateLimitStore) {
+    if (entry.windowStart < cutoff) rateLimitStore.delete(ip);
+  }
+}, 10 * 60 * 1000).unref(); // .unref() so this timer doesn't keep the process alive
+
+// ── 1. CORS ───────────────────────────────────────────────────────────────────
 export function setCorsHeaders(req, res, { anyOrigin = false } = {}) {
-  const SHOP_DOMAIN        = process.env.SHOPIFY_STORE_DOMAIN;   // e.g. handsnose.com
-  const SHOP_MYSHOPIFY     = process.env.SHOPIFY_MYSHOPIFY_DOMAIN; // e.g. handsnose.myshopify.com
-  const origin             = req.headers.origin || '';
+  const SHOP_DOMAIN    = process.env.SHOPIFY_STORE_DOMAIN;
+  const SHOP_MYSHOPIFY = process.env.SHOPIFY_MYSHOPIFY_DOMAIN;
+  const origin         = req.headers.origin || '';
 
   if (anyOrigin) {
-    // Beacon endpoint: no credentials are used, so '*' is safe.
     res.setHeader('Access-Control-Allow-Origin', '*');
   } else {
-    // All domains that are allowed to call this API
     const allowedOrigins = [
-      SHOP_DOMAIN        ? `https://${SHOP_DOMAIN}`    : null,  // custom domain
-      SHOP_MYSHOPIFY     ? `https://${SHOP_MYSHOPIFY}` : null,  // myshopify domain
+      SHOP_DOMAIN    ? `https://${SHOP_DOMAIN}`    : null,
+      SHOP_MYSHOPIFY ? `https://${SHOP_MYSHOPIFY}` : null,
     ].filter(Boolean);
 
-    // Only allow exact store domains — no wildcard myshopify.com
-    const isAllowed = allowedOrigins.length > 0 && allowedOrigins.includes(origin);
-
-    res.setHeader(
-      'Access-Control-Allow-Origin',
-      isAllowed ? origin : (allowedOrigins[0] || '')
-    );
+    if (allowedOrigins.includes(origin)) {
+      // Only echo the origin back when it is explicitly allowed
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+    // When origin is not allowed, set nothing — browser blocks it
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
@@ -48,19 +60,18 @@ export function setCorsHeaders(req, res, { anyOrigin = false } = {}) {
   res.setHeader('Vary', 'Origin');
 }
 
-// ── 2. Rate limiting by IP ──
+// ── 2. Rate limiting ──────────────────────────────────────────────────────────
 export function checkRateLimit(req, res) {
   const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
     || req.socket?.remoteAddress
     || 'unknown';
 
-  const now  = Date.now();
+  const now   = Date.now();
   const entry = rateLimitStore.get(ip);
 
   if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW) {
-    // New window
     rateLimitStore.set(ip, { count: 1, windowStart: now });
-    return null; // OK
+    return null;
   }
 
   if (entry.count >= RATE_LIMIT_MAX) {
@@ -72,51 +83,45 @@ export function checkRateLimit(req, res) {
   }
 
   entry.count++;
-  return null; // OK
+  return null;
 }
 
-// ── 3. Payload size check ──
+// ── 3. Payload size ───────────────────────────────────────────────────────────
 export function checkPayloadSize(req, res) {
   const contentLength = parseInt(req.headers['content-length'] || '0');
   if (contentLength > MAX_BODY_BYTES) {
     return res.status(413).json({ error: 'Payload too large' });
   }
-  return null; // OK
+  return null;
 }
 
-// ── 4. HMAC signature verification ──
-// The Liquid form signs: SHA256(timestamp + "." + body_json, HMAC_SECRET)
-// Backend verifies this signature before processing anything
+// ── 4. HMAC signature verification ───────────────────────────────────────────
 export function verifyHmac(req, res) {
   const SECRET    = process.env.HMAC_SECRET;
   const timestamp = req.headers['x-timestamp'];
   const signature = req.headers['x-signature'];
 
   if (!SECRET) {
-    // If secret not configured, skip (dev mode) but log warning
-    console.warn('⚠️  HMAC_SECRET not set — skipping signature verification');
-    return null;
+    // Fail closed — missing secret is a misconfiguration, not a pass
+    console.error('HMAC_SECRET not set — rejecting request');
+    return res.status(500).json({ error: 'Server misconfiguration' });
   }
 
   if (!timestamp || !signature) {
     return res.status(401).json({ error: 'Missing security headers' });
   }
 
-  // ── Timestamp check — reject requests older than 5 minutes ──
-  const ts = parseInt(timestamp);
-  if (isNaN(ts) || Date.now() - ts > TIMESTAMP_TTL) {
+  const ts  = parseInt(timestamp);
+  const now = Date.now();
+  // Reject if older than 5 min OR if more than 30 seconds in the future
+  if (isNaN(ts) || now - ts > TIMESTAMP_TTL || ts - now > 30_000) {
     return res.status(401).json({ error: 'Request expired' });
   }
 
-  // ── HMAC check ──
-  const body    = JSON.stringify(req.body || {});
-  const message = `${timestamp}.${body}`;
-  const expected = crypto
-    .createHmac('sha256', SECRET)
-    .update(message)
-    .digest('hex');
+  const body     = JSON.stringify(req.body || {});
+  const message  = `${timestamp}.${body}`;
+  const expected = crypto.createHmac('sha256', SECRET).update(message).digest('hex');
 
-  // Timing-safe comparison prevents timing attacks
   const sigBuffer      = Buffer.from(signature, 'hex');
   const expectedBuffer = Buffer.from(expected,  'hex');
 
@@ -124,64 +129,57 @@ export function verifyHmac(req, res) {
     sigBuffer.length !== expectedBuffer.length ||
     !crypto.timingSafeEqual(sigBuffer, expectedBuffer)
   ) {
-    console.warn('⚠️  Invalid HMAC signature from IP:', req.headers['x-forwarded-for']);
+    console.warn('Invalid HMAC signature from IP:', req.headers['x-forwarded-for']?.split(',')[0] || 'unknown');
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
-  return null; // OK
+  return null;
 }
 
-// ── 5. Cloudflare Turnstile bot verification ──
+// ── 5. Turnstile bot verification ─────────────────────────────────────────────
 export async function verifyTurnstile(req, res) {
   const SECRET = process.env.TURNSTILE_SECRET;
 
   if (!SECRET) {
-    console.warn('⚠️  TURNSTILE_SECRET not set — skipping bot check');
+    console.warn('TURNSTILE_SECRET not set — skipping bot check');
     return null;
   }
 
   const token = req.body?.turnstileToken;
-
   if (!token) {
     return res.status(403).json({ error: 'Missing bot verification token' });
   }
 
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-    || req.socket?.remoteAddress
-    || '';
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
 
   try {
-    const verifyRes = await fetch(
+    const verifyRes = await fetchWithTimeout(
       'https://challenges.cloudflare.com/turnstile/v0/siteverify',
       {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          secret:   SECRET,
-          response: token,
-          remoteip: ip
-        })
-      }
+        body:    JSON.stringify({ secret: SECRET, response: token, remoteip: ip })
+      },
+      8_000
     );
 
     const data = await verifyRes.json();
 
     if (!data.success) {
-      console.warn('⚠️  Turnstile failed:', data['error-codes'], 'IP:', ip);
+      console.warn('Turnstile failed:', data['error-codes'], 'IP:', ip);
       return res.status(403).json({ error: 'Bot verification failed' });
     }
 
-    return null; // OK
+    return null;
   } catch (err) {
-    console.error('Turnstile verification error:', err);
-    // Fail open — don't block real users if Cloudflare is down
+    // Fail open only on Cloudflare timeout — don't block real users if Cloudflare is down
+    console.error('Turnstile verification error (failing open):', err.message);
     return null;
   }
 }
-// ── 5. Run all security checks in order ──
-// Returns a response if blocked, null if all checks pass
-// ── 6. Run all security checks in order ──
-export function runSecurityChecks(req, res, { skipHmac = false, skipTurnstile = false, anyOrigin = false } = {}) {
+
+// ── 6. Combined security check ────────────────────────────────────────────────
+export function runSecurityChecks(req, res, { skipHmac = false, anyOrigin = false } = {}) {
   setCorsHeaders(req, res, { anyOrigin });
 
   if (req.method === 'OPTIONS') {
@@ -200,8 +198,6 @@ export function runSecurityChecks(req, res, { skipHmac = false, skipTurnstile = 
       const hmacResult = verifyHmac(req, res);
       if (hmacResult) return true;
     }
-
-    // ── Turnstile is async so it's handled in the handler directly ──
   }
 
   return false;

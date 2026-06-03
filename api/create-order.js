@@ -5,7 +5,7 @@
 //  Security: HMAC + timestamp + rate limiting + origin check
 // ============================================================
 
-import { runSecurityChecks, verifyTurnstile } from './_security.js';
+import { runSecurityChecks, verifyTurnstile, fetchWithTimeout } from './_security.js';
 import { trackPurchase } from './_tracking.js';
 
 export default async function handler(req, res) {
@@ -125,17 +125,17 @@ export default async function handler(req, res) {
   let draftId;
 
   try {
-    const draftRes = await fetch(
+    const draftRes = await fetchWithTimeout(
       `https://${SHOP}/admin/api/${API_VER}/draft_orders.json`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': TOKEN },
         body: JSON.stringify(draftPayload)
-      }
+      },
+      15_000
     );
     if (!draftRes.ok) {
-      const err = await draftRes.json();
-      console.error('Draft order creation failed:', err);
+      console.error('Draft order creation failed — HTTP', draftRes.status);
       return res.status(502).json({ error: 'Failed to create draft order' });
     }
     const draftData = await draftRes.json();
@@ -147,17 +147,17 @@ export default async function handler(req, res) {
   }
 
   try {
-    const completeRes = await fetch(
+    const completeRes = await fetchWithTimeout(
       `https://${SHOP}/admin/api/${API_VER}/draft_orders/${draftId}/complete.json?payment_pending=true`,
       {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': TOKEN }
-      }
+      },
+      15_000
     );
     if (!completeRes.ok) {
-      const err = await completeRes.json();
-      console.error('Completion failed:', err);
-      return res.status(502).json({ error: 'Order created but could not be completed', draftId });
+      console.error('Draft completion failed — HTTP', completeRes.status, 'draftId:', draftId);
+      return res.status(502).json({ error: 'Order created but could not be completed' });
     }
 
     const completeData = await completeRes.json();
@@ -168,9 +168,10 @@ export default async function handler(req, res) {
 let fullOrder = null;
 
 try {
-  const fullOrderRes = await fetch(
+  const fullOrderRes = await fetchWithTimeout(
     `https://${SHOP}/admin/api/${API_VER}/orders/${order.order_id}.json`,
-    { headers: { 'X-Shopify-Access-Token': TOKEN } }
+    { headers: { 'X-Shopify-Access-Token': TOKEN } },
+    10_000
   );
 
   if (!fullOrderRes.ok) {

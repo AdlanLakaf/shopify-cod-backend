@@ -7,7 +7,7 @@
  * Cached in-memory for 10 minutes.
  */
 
-import { runSecurityChecks } from './_security.js';
+import { runSecurityChecks, fetchWithTimeout } from './_security.js';
 import { readFileSync }      from 'fs';
 import { fileURLToPath }     from 'url';
 import { dirname, join }     from 'path';
@@ -111,30 +111,21 @@ function buildWilayaMap(rates, hubs) {
 // ── ZR Express fetchers ───────────────────────────────────────────────────────
 
 async function fetchRates(tenant, apiKey) {
-  const res = await fetch(ZR_RATES_URL, {
+  const res = await fetchWithTimeout(ZR_RATES_URL, {
     method:  'GET',
-    headers: {
-      Accept:      'application/json',
-      'X-Tenant':  tenant,
-      'X-Api-Key': apiKey
-    }
-  });
-  if (!res.ok) throw new Error(`ZR rates ${res.status}: ${await res.text()}`);
+    headers: { Accept: 'application/json', 'X-Tenant': tenant, 'X-Api-Key': apiKey }
+  }, 12_000);
+  if (!res.ok) throw new Error(`ZR rates HTTP ${res.status}`);
   return res.json();
 }
 
 async function fetchHubs(tenant, apiKey) {
-  const res = await fetch(ZR_HUBS_URL, {
+  const res = await fetchWithTimeout(ZR_HUBS_URL, {
     method:  'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept:         'application/json',
-      'X-Tenant':     tenant,
-      'X-Api-Key':    apiKey
-    },
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Tenant': tenant, 'X-Api-Key': apiKey },
     body: JSON.stringify({ pageNumber: 1, pageSize: 1000 })
-  });
-  if (!res.ok) throw new Error(`ZR hubs ${res.status}: ${await res.text()}`);
+  }, 12_000);
+  if (!res.ok) throw new Error(`ZR hubs HTTP ${res.status}`);
   const data = await res.json();
 
   return (data.items || [])
@@ -216,6 +207,6 @@ export default async function handler(req, res) {
       return res.status(200).json({ wilayas: _cache, cachedAt: _cacheTs, stale: true });
     }
 
-    return res.status(502).json({ error: err.message });
+    return res.status(502).json({ error: 'Failed to fetch delivery data. Please try again.' });
   }
 }

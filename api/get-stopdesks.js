@@ -3,7 +3,7 @@
 //  GET /api/get-stopdesks
 //  Security: rate limiting + origin check (no HMAC — GET request)
 // ============================================================
-import { runSecurityChecks } from './_security.js';
+import { runSecurityChecks, fetchWithTimeout } from './_security.js';
 
 export default async function handler(req, res) {
   const blocked = runSecurityChecks(req, res, { skipHmac: true });
@@ -21,19 +21,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    const zrRes = await fetch('https://api.zrexpress.app/api/v1/hubs/search', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'accept':       'application/json',
-        'X-Tenant':     TENANT,
-        'X-Api-Key':    API_KEY
-      },
-      body: JSON.stringify({
-        pageNumber: 1,
-        pageSize:   1000
-      })
-    });
+    const zrRes = await fetchWithTimeout('https://api.zrexpress.app/api/v1/hubs/search', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Tenant': TENANT, 'X-Api-Key': API_KEY },
+      body:    JSON.stringify({ pageNumber: 1, pageSize: 1000 })
+    }, 12_000);
 
     if (!zrRes.ok) {
       const err = await zrRes.text();

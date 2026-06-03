@@ -1,30 +1,25 @@
 // ============================================================
 //  Express HTTP server — for Railway (production)
 //  Vercel continues to work via vercel.json (testing only)
-//
-//  Railway provides PORT via env. All handler files are
-//  Express-compatible as-is; only body parsing differs
-//  (Vercel auto-parses, Express needs express.json()).
 // ============================================================
 
 import express from 'express';
+import cron    from 'node-cron';
 
-import createOrderHandler    from './api/create-order.js';
-import getPageDataHandler    from './api/get-page-data.js';
+import createOrderHandler      from './api/create-order.js';
+import getPageDataHandler      from './api/get-page-data.js';
 import getDeliveryRatesHandler from './api/get-delivery-rates.js';
-import getStopdesksHandler   from './api/get-stopdesks.js';
-import trackEventHandler     from './api/track-event.js';
+import getStopdesksHandler     from './api/get-stopdesks.js';
+import trackEventHandler       from './api/track-event.js';
+import { syncPageData }        from './api/sync-page-data.js';
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// Trust Railway's reverse proxy so req.headers['x-forwarded-for'] is reliable
 app.set('trust proxy', 1);
-
-// Body parsing — must come before routes (Vercel did this automatically)
 app.use(express.json({ limit: '5kb' }));
 
-// Root — status page
+// ── Root status page ──────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -34,10 +29,10 @@ app.get('/', (_req, res) => {
       <title>HandsNose COD Backend</title>
       <style>
         body { font-family: system-ui, sans-serif; max-width: 480px; margin: 80px auto; padding: 0 24px; color: #111; }
-        h1 { font-size: 1.4rem; margin-bottom: 4px; }
-        p  { color: #555; margin: 4px 0; }
+        h1   { font-size: 1.4rem; margin-bottom: 4px; }
+        p    { color: #555; margin: 4px 0; }
         code { background: #f4f4f4; padding: 2px 6px; border-radius: 4px; font-size: .9em; }
-        .ok { color: #16a34a; font-weight: 600; }
+        .ok  { color: #16a34a; font-weight: 600; }
       </style>
     </head>
     <body>
@@ -50,21 +45,62 @@ app.get('/', (_req, res) => {
         <li><code>GET  /api/get-delivery-rates</code></li>
         <li><code>GET  /api/get-stopdesks</code></li>
         <li><code>POST /api/track-event</code></li>
+        <li><code>POST /api/admin/sync-page-data</code> (manual trigger)</li>
       </ul>
     </body>
     </html>
   `);
 });
 
-// Health check — used by Railway healthcheck probe
+// ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// API routes — handlers export default function handler(req, res), same as Express middleware
+// ── API routes ────────────────────────────────────────────────────────────────
 app.all('/api/create-order',       createOrderHandler);
 app.all('/api/get-page-data',      getPageDataHandler);
 app.all('/api/get-delivery-rates', getDeliveryRatesHandler);
 app.all('/api/get-stopdesks',      getStopdesksHandler);
 app.all('/api/track-event',        trackEventHandler);
+
+// ── Manual sync trigger (protected with ADMIN_SECRET bearer token) ────────────
+app.post('/api/admin/sync-page-data', async (req, res) => {
+  const secret = process.env.ADMIN_SECRET;
+  // Fail closed — if ADMIN_SECRET is not set, block all requests
+  if (!secret || req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    await syncPageData();
+    res.json({ ok: true, message: 'page-data.json updated on Shopify CDN' });
+  } catch (err) {
+    console.error('[admin/sync-page-data]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Daily cron — midnight Algeria time (UTC+1) = 23:00 UTC ───────────────────
+// Runs once per day to push fresh ZR Express data to Shopify theme assets.
+// This eliminates all ZR Express API calls from user page loads.
+cron.schedule('0 23 * * *', async () => {
+  console.log('[cron] Starting daily page-data sync...');
+  try {
+    await syncPageData();
+    console.log('[cron] Daily page-data sync completed successfully');
+  } catch (err) {
+    console.error('[cron] Daily page-data sync failed:', err.message);
+  }
+}, { timezone: 'UTC' });
+
+// ── Startup sync — populate static file immediately on first deploy ───────────
+// Runs in background so it doesn't block the server from starting.
+(async () => {
+  try {
+    await syncPageData();
+    console.log('[startup] Initial page-data sync completed');
+  } catch (err) {
+    console.warn('[startup] Initial page-data sync skipped:', err.message);
+  }
+})();
 
 app.listen(PORT, () => {
   console.log(`[server] Running on port ${PORT}`);

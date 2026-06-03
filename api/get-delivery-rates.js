@@ -27,7 +27,7 @@
  * }
  */
 
-import { runSecurityChecks } from './_security.js';
+import { runSecurityChecks, fetchWithTimeout } from './_security.js';
 
 const ZR_RATES_URL = 'https://api.zrexpress.app/api/v1/delivery-pricing/rates';
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -104,14 +104,10 @@ export default async function handler(req, res) {
 
   // ── Fetch fresh data from ZR Express ─────────────────────────────────────
   try {
-    const upstream = await fetch(ZR_RATES_URL, {
+    const upstream = await fetchWithTimeout(ZR_RATES_URL, {
       method:  'GET',
-      headers: {
-        'Accept':   'application/json',
-        'X-Tenant': tenantId,
-        'X-Api-Key': apiKey,
-      },
-    });
+      headers: { Accept: 'application/json', 'X-Tenant': tenantId, 'X-Api-Key': apiKey },
+    }, 12_000);
 
     if (!upstream.ok) {
       const body = await upstream.text();
