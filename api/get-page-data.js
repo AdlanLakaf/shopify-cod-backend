@@ -34,12 +34,6 @@ let _cacheTs = 0;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function wilayaCodeFromPostal(postalCode) {
-  if (!postalCode) return null;
-  const prefix = parseInt(String(postalCode).trim().slice(0, 2), 10);
-  return isNaN(prefix) ? null : prefix;
-}
-
 function normaliseRates(raw) {
   const map = {};
   for (const territory of (raw.rates || [])) {
@@ -123,39 +117,64 @@ async function fetchRates(tenant, apiKey) {
   return res.json();
 }
 
-async function fetchHubs(tenant, apiKey) {
-  const res = await fetchWithTimeout(ZR_HUBS_URL, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Tenant': tenant, 'X-Api-Key': apiKey },
-    body: JSON.stringify({ pageNumber: 1, pageSize: 1000 })
-  }, 12_000);
-  if (!res.ok) throw new Error(`ZR hubs HTTP ${res.status}`);
-  const data = await res.json();
+function mapHub(hub) {
+  const wilayaId = (() => {
+    // Prefer explicit API fields — most reliable
+    if (hub.wilayaCode)          return parseInt(hub.wilayaCode,          10);
+    if (hub.wilayaId)            return parseInt(hub.wilayaId,            10);
+    if (hub.address?.wilayaCode) return parseInt(hub.address.wilayaCode,  10);
+    // Last resort: postal code prefix — Algeria uses 5-digit codes where the
+    // first 2 digits historically matched the wilaya number. However, when Algeria
+    // expanded from 48 to 58 wilayas, new wilayas inherited old postal prefixes,
+    // so this mapping can be wrong for wilayas 49–58. Use with caution.
+    if (hub.address?.postalCode) {
+      const prefix = parseInt(String(hub.address.postalCode).slice(0, 2), 10);
+      if (!isNaN(prefix) && prefix >= 1 && prefix <= 58) return prefix;
+    }
+    return null;
+  })();
+  return {
+    id:           String(hub.id),              // always string — prevents === mismatch with DOM values
+    name:         hub.name                || '',
+    city:         hub.address?.city       || '',
+    district:     hub.address?.district   || '',
+    street:       hub.address?.street     || '',
+    openingHours: hub.openingHours        || '',
+    phone:        hub.phone?.number1      || '',
+    wilayaId:     (wilayaId >= 1 && wilayaId <= 58) ? wilayaId : null
+  };
+}
 
-  return (data.items || [])
-  .filter(hub => hub.isPickupPoint === true)
-  .map(hub => {
-    // Prefer explicit API fields; fall back to extracting a 1-2 digit number
-    // from the hub name (wilaya codes are 1–58), validated against that range.
-    const wilayaId = (() => {
-      if (hub.wilayaCode) return parseInt(hub.wilayaCode, 10);
-      if (hub.wilayaId)   return parseInt(hub.wilayaId,   10);
-      if (hub.address?.wilayaCode) return parseInt(hub.address.wilayaCode, 10);
-      const m = hub.name.match(/\b(\d{1,2})\b/);
-      return m ? parseInt(m[1], 10) : null;
-    })();
-    return {
-      id:           hub.id,
-      name:         hub.name                || '',
-      city:         hub.address?.city       || '',
-      district:     hub.address?.district   || '',
-      street:       hub.address?.street     || '',
-      openingHours: hub.openingHours        || '',
-      phone:        hub.phone?.number1      || '',
-      wilayaId:     (wilayaId >= 1 && wilayaId <= 58) ? wilayaId : null
-    };
-  })
-  .filter(hub => hub.wilayaId !== null);
+async function fetchHubs(tenant, apiKey) {
+  // Fetch all pages — the API may cap pageSize below our requested value,
+  // so we loop until a page returns fewer items than requested.
+  const PAGE_SIZE  = 200; // conservative; avoids hitting API limits
+  const MAX_PAGES  = 20;  // safety ceiling (~4 000 hubs max)
+  const allItems   = [];
+  let   pageNumber = 1;
+
+  while (pageNumber <= MAX_PAGES) {
+    const res = await fetchWithTimeout(ZR_HUBS_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Tenant': tenant, 'X-Api-Key': apiKey },
+      body:    JSON.stringify({ pageNumber, pageSize: PAGE_SIZE })
+    }, 12_000);
+    if (!res.ok) throw new Error(`ZR hubs HTTP ${res.status} (page ${pageNumber})`);
+    const data  = await res.json();
+    const items = data.items || [];
+
+    allItems.push(...items);
+
+    // Fewer items than requested → this was the last page
+    if (items.length < PAGE_SIZE) break;
+    pageNumber++;
+  }
+
+  return allItems
+    // Bug fix: use !! instead of === true — API may return 1 or "true"
+    .filter(hub => !!hub.isPickupPoint)
+    .map(mapHub)
+    .filter(hub => hub.wilayaId !== null);
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────

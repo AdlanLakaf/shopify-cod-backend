@@ -103,32 +103,55 @@ async function fetchRates(tenant, apiKey) {
   return res.json();
 }
 
+function mapHub(hub) {
+  const wilayaId = (() => {
+    if (hub.wilayaCode)          return parseInt(hub.wilayaCode,          10);
+    if (hub.wilayaId)            return parseInt(hub.wilayaId,            10);
+    if (hub.address?.wilayaCode) return parseInt(hub.address.wilayaCode,  10);
+    // Postal code prefix — unreliable for new wilayas 49–58 which kept old parent
+    // wilaya postal codes when Algeria expanded from 48 to 58 wilayas.
+    if (hub.address?.postalCode) {
+      const prefix = parseInt(String(hub.address.postalCode).slice(0, 2), 10);
+      if (!isNaN(prefix) && prefix >= 1 && prefix <= 58) return prefix;
+    }
+    return null;
+  })();
+  return {
+    id:           String(hub.id),
+    name:         hub.name                || '',
+    city:         hub.address?.city       || '',
+    district:     hub.address?.district   || '',
+    street:       hub.address?.street     || '',
+    openingHours: hub.openingHours        || '',
+    phone:        hub.phone?.number1      || '',
+    wilayaId:     (wilayaId >= 1 && wilayaId <= 58) ? wilayaId : null
+  };
+}
+
 async function fetchHubs(tenant, apiKey) {
-  const res = await fetchWithTimeout(ZR_HUBS_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Tenant': tenant, 'X-Api-Key': apiKey },
-    body: JSON.stringify({ pageNumber: 1, pageSize: 1000 })
-  }, 12_000);
-  if (!res.ok) throw new Error(`ZR hubs HTTP ${res.status}`);
-  const data = await res.json();
-  return (data.items || [])
-    .filter(hub => hub.isPickupPoint === true)
-    .map(hub => {
-      const wilayaId = (() => {
-        if (hub.wilayaCode)          return parseInt(hub.wilayaCode, 10);
-        if (hub.wilayaId)            return parseInt(hub.wilayaId,   10);
-        if (hub.address?.wilayaCode) return parseInt(hub.address.wilayaCode, 10);
-        const m = hub.name.match(/\b(\d{1,2})\b/);
-        return m ? parseInt(m[1], 10) : null;
-      })();
-      return {
-        id: hub.id, name: hub.name || '',
-        city: hub.address?.city || '', district: hub.address?.district || '',
-        street: hub.address?.street || '', openingHours: hub.openingHours || '',
-        phone: hub.phone?.number1 || '',
-        wilayaId: (wilayaId >= 1 && wilayaId <= 58) ? wilayaId : null
-      };
-    })
+  const PAGE_SIZE  = 200;
+  const MAX_PAGES  = 20;
+  const allItems   = [];
+  let   pageNumber = 1;
+
+  while (pageNumber <= MAX_PAGES) {
+    const res = await fetchWithTimeout(ZR_HUBS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Tenant': tenant, 'X-Api-Key': apiKey },
+      body:   JSON.stringify({ pageNumber, pageSize: PAGE_SIZE })
+    }, 12_000);
+    if (!res.ok) throw new Error(`ZR hubs HTTP ${res.status} (page ${pageNumber})`);
+    const data  = await res.json();
+    const items = data.items || [];
+
+    allItems.push(...items);
+    if (items.length < PAGE_SIZE) break;
+    pageNumber++;
+  }
+
+  return allItems
+    .filter(hub => !!hub.isPickupPoint)
+    .map(mapHub)
     .filter(hub => hub.wilayaId !== null);
 }
 
