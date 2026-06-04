@@ -51,6 +51,7 @@ export default async function handler(req, res) {
     gclid           = '',
     sourceUrl       = '',
     referrer        = '',
+    trafficSource   = '',
     productTitle    = '',
     contentCategory = ''
   } = req.body;
@@ -74,6 +75,7 @@ export default async function handler(req, res) {
   const cleanNote = sanitize(extraNote).replace(/[\n\r]/g, ' ');
 
   const orderSource = detectSource({
+    trafficSource,
     fbc, ttclid, gclid,
     userAgent: req.headers['user-agent'] || '',
     referrer:  sanitize(referrer)
