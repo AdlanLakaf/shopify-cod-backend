@@ -1,13 +1,12 @@
 /**
  * GET /api/count-hubs
  *
- * Diagnostic: compares hub counts between:
- *   1. ZR Express API  — raw isPickupPoint=true total
- *   2. Our mapped output — what buildWilayaMap would put in page-data.json
+ * Diagnostic: exposes exactly what ZR Express returns vs what we keep.
+ * Key addition over v1: shows ALL raw hubs for new wilayas 49–58 BEFORE
+ * any isPickupPoint / wilaya-resolution filter, so you can see the real
+ * field values on every hub and spot why some are dropped.
  *
- * Exposes which wilaya-resolution path each hub took (wilayaCode / wilayaId /
- * address.wilayaCode / postalCode / none) so you can spot the postal-code
- * mismatch bug for new wilayas 49–58.
+ * Only active when TEST_MODE=true env var is set.
  */
 
 import { runSecurityChecks, fetchWithTimeout } from './_security.js';
@@ -19,7 +18,6 @@ const __dirname   = dirname(fileURLToPath(import.meta.url));
 const WILAYAS_RAW = JSON.parse(readFileSync(join(__dirname, 'data', 'wilayas.json'), 'utf8'));
 const ZR_HUBS_URL = 'https://api.zrexpress.app/api/v1/hubs/search';
 
-// Build a name lookup once at module load
 const WILAYA_NAMES = {};
 for (const w of WILAYAS_RAW) {
   WILAYA_NAMES[String(parseInt(w.wilaya_code, 10))] = w.wilaya_name;
@@ -45,7 +43,7 @@ async function fetchAllRawHubs(tenant, apiKey) {
   return all;
 }
 
-// Mirrors the exact resolution order used in get-page-data.js mapHub()
+// Mirrors exact resolution order in get-page-data.js mapHub()
 function resolveWilayaId(hub) {
   if (hub.wilayaCode) {
     const id = parseInt(hub.wilayaCode, 10);
@@ -66,7 +64,31 @@ function resolveWilayaId(hub) {
   return { id: null, via: 'none' };
 }
 
+// Strip only the fields we need to understand a hub — avoids huge payloads
+function summariseHub(hub) {
+  const { id, via } = resolveWilayaId(hub);
+  return {
+    hubId:            hub.id,
+    name:             hub.name,
+    isPickupPoint:    hub.isPickupPoint,
+    // Direct wilaya fields
+    wilayaCode:       hub.wilayaCode       ?? null,
+    wilayaId:         hub.wilayaId         ?? null,
+    addrWilayaCode:   hub.address?.wilayaCode ?? null,
+    postalCode:       hub.address?.postalCode ?? null,
+    city:             hub.address?.city    ?? null,
+    // How our resolver sees it
+    resolvedWilaya:   id,
+    resolvedVia:      via,
+    resolvedName:     id ? (WILAYA_NAMES[String(id)] || '?') : null,
+  };
+}
+
 export default async function handler(req, res) {
+  if (process.env.TEST_MODE !== 'true') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
   const blocked = runSecurityChecks(req, res, { skipHmac: true });
   if (blocked) return;
 
@@ -77,61 +99,66 @@ export default async function handler(req, res) {
   if (!tenant || !apiKey) return res.status(500).json({ error: 'Missing ZR_TENANT or ZR_API_KEY env vars' });
 
   try {
-    const rawHubs    = await fetchAllRawHubs(tenant, apiKey);
-    const apiTotal   = rawHubs.length;
-    const pickupHubs = rawHubs.filter(h => !!h.isPickupPoint);
-    const pickupTotal = pickupHubs.length;
+    const rawHubs = await fetchAllRawHubs(tenant, apiKey);
 
+    // ── Counts before any filter ──────────────────────────────────────────────
+    const totalFromApi   = rawHubs.length;
+    const pickupHubs     = rawHubs.filter(h => !!h.isPickupPoint);
+    const nonPickupHubs  = rawHubs.filter(h => !h.isPickupPoint);
+    const pickupTotal    = pickupHubs.length;
+
+    // ── Per-wilaya counts for pickup hubs (after isPickupPoint filter) ────────
     const viaBreakdown = { wilayaCode: 0, wilayaId: 0, 'address.wilayaCode': 0, postalCode: 0, none: 0 };
-    const apiPerWilaya = {};  // wilayaId string → count
+    const apiPerWilaya = {};
     const unresolved   = [];
 
     for (const hub of pickupHubs) {
       const { id, via } = resolveWilayaId(hub);
       viaBreakdown[via] = (viaBreakdown[via] || 0) + 1;
-
-      if (!id) {
-        unresolved.push({
-          hubId:      hub.id,
-          name:       hub.name,
-          postalCode: hub.address?.postalCode ?? null,
-          rawWilayaCode: hub.wilayaCode ?? null,
-          rawWilayaId:   hub.wilayaId   ?? null
-        });
-        continue;
-      }
+      if (!id) { unresolved.push(summariseHub(hub)); continue; }
       const key = String(id);
       apiPerWilaya[key] = (apiPerWilaya[key] || 0) + 1;
     }
 
-    // New wilayas spotlight — these are most likely to have postal-code mismatch
-    const NEW_WILAYAS = ['49','50','51','52','53','54','55','56','57','58'];
-    const newWilayaReport = {};
-    for (const k of NEW_WILAYAS) {
-      newWilayaReport[k] = {
-        name:    WILAYA_NAMES[k] || '?',
-        inApi:   apiPerWilaya[k] || 0
+    // ── New wilayas 49–58: full hub list BEFORE isPickupPoint filter ──────────
+    // Shows every hub that resolves to one of these wilayas so you can see
+    // the real isPickupPoint value and all wilaya-resolution fields.
+    const NEW_WILAYA_KEYS = new Set(['49','50','51','52','53','54','55','56','57','58']);
+
+    const newWilayaAllHubs = rawHubs
+      .map(hub => summariseHub(hub))
+      .filter(s => s.resolvedWilaya && NEW_WILAYA_KEYS.has(String(s.resolvedWilaya)));
+
+    // Also catch hubs that mention new-wilaya cities by name but resolved elsewhere
+    // (postal-code cross-mapping) — look at ALL hubs resolved to old wilayas whose
+    // postalCode prefix differs from the resolved wilaya id
+    const postalCodeMismatches = pickupHubs
+      .map(hub => summariseHub(hub))
+      .filter(s => {
+        if (s.resolvedVia !== 'postalCode') return false;
+        // flag if the postal prefix maps to a wilaya number that doesn't match
+        // what a direct wilayaCode/wilayaId field would say (those are absent,
+        // which is why we fell through to postalCode)
+        return true; // already means wilayaCode/wilayaId were absent
+      });
+
+    // ── Summary per new wilaya ────────────────────────────────────────────────
+    const newWilayaSummary = {};
+    for (const k of NEW_WILAYA_KEYS) {
+      const allForWilaya     = newWilayaAllHubs.filter(h => String(h.resolvedWilaya) === k);
+      const pickupForWilaya  = allForWilaya.filter(h => !!h.isPickupPoint);
+      newWilayaSummary[k] = {
+        name:              WILAYA_NAMES[k] || '?',
+        totalHubs:         allForWilaya.length,    // all, regardless of isPickupPoint
+        isPickupPointTrue: pickupForWilaya.length, // what we'd include
+        hubs:              allForWilaya,            // full detail for every hub
       };
     }
 
-    // Hubs whose postalCode maps to a new-wilaya number — suspect cross-mapping
-    const postalCodeMapped = pickupHubs
-      .filter(hub => {
-        const { via } = resolveWilayaId(hub);
-        return via === 'postalCode';
-      })
-      .map(hub => {
-        const { id } = resolveWilayaId(hub);
-        return {
-          hubId:      hub.id,
-          name:       hub.name,
-          postalCode: hub.address?.postalCode,
-          mappedTo:   id,
-          mappedName: WILAYA_NAMES[String(id)] || '?'
-        };
-      });
+    // ── One raw sample hub (first pickup hub) so you can see the full schema ──
+    const rawSample = pickupHubs[0] ?? rawHubs[0] ?? null;
 
-    // Full per-wilaya table (sorted by wilaya id)
+    // ── Full per-wilaya table (pickup hubs only, sorted) ─────────────────────
     const perWilaya = Object.fromEntries(
       Object.entries(apiPerWilaya)
         .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
@@ -139,24 +166,25 @@ export default async function handler(req, res) {
     );
 
     return res.status(200).json({
-      // ── Summary ──
       counts: {
-        apiRawTotal:         apiTotal,
-        isPickupPointTotal:  pickupTotal,
-        mappedToWilaya:      pickupTotal - unresolved.length,
-        unresolved:          unresolved.length
+        apiRawTotal:        totalFromApi,
+        isPickupPointTrue:  pickupTotal,
+        isPickupPointFalse: nonPickupHubs.length,
+        mappedToWilaya:     pickupTotal - unresolved.length,
+        unresolved:         unresolved.length,
       },
-      // ── How each hub was resolved ──
       viaBreakdown,
-      // ── New wilayas (49–58) — compare inApi with what page-data shows ──
-      newWilayas49to58: newWilayaReport,
-      // ── Hubs resolved only via postalCode prefix (risky for 49–58) ──
-      postalCodeMappedCount: postalCodeMapped.length,
-      postalCodeMappedSample: postalCodeMapped.slice(0, 10),
-      // ── Hubs that couldn't be assigned to any wilaya ──
+      // ── THE KEY SECTION: every hub for wilayas 49–58, unfiltered ──
+      newWilayas49to58: newWilayaSummary,
+      // ── Hubs using postalCode fallback (no wilayaCode/wilayaId in API) ──
+      postalCodeFallbackCount:  postalCodeMismatches.length,
+      postalCodeFallbackSample: postalCodeMismatches.slice(0, 5),
+      // ── Unresolvable pickup hubs ──
       unresolvedSample: unresolved.slice(0, 10),
-      // ── Full breakdown ──
-      perWilaya
+      // ── Full pickup-hub breakdown by wilaya ──
+      perWilaya,
+      // ── Raw schema sample (first hub, all fields) ──
+      rawHubSample: rawSample,
     });
 
   } catch (err) {

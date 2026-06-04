@@ -7,6 +7,7 @@
 
 import { runSecurityChecks, verifyTurnstile, fetchWithTimeout, log } from './_security.js';
 import { trackPurchase } from './_tracking.js';
+import { detectSource }  from './_attribution.js';
 
 export default async function handler(req, res) {
   const blocked = runSecurityChecks(req, res, { skipHmac: true });
@@ -49,6 +50,7 @@ export default async function handler(req, res) {
     ttclid          = '',
     gclid           = '',
     sourceUrl       = '',
+    referrer        = '',
     productTitle    = '',
     contentCategory = ''
   } = req.body;
@@ -70,6 +72,13 @@ export default async function handler(req, res) {
   const cleanBaladiya = sanitize(baladiya);
   const cleanAddress  = sanitize(address);
   const cleanNote = sanitize(extraNote).replace(/[\n\r]/g, ' ');
+
+  const orderSource = detectSource({
+    fbc, ttclid, gclid,
+    userAgent: req.headers['user-agent'] || '',
+    referrer:  sanitize(referrer)
+  });
+  log(`[order] source detected: ${orderSource}`);
 
   const algerianPhoneRegex = /^(05|06|07)\d{8}$/;
   if (!algerianPhoneRegex.test(cleanPhone)) {
@@ -115,7 +124,7 @@ export default async function handler(req, res) {
         price: (typeof shippingCost === 'number' && shippingCost >= 0) ? shippingCost.toFixed(2) : '0.00',
         code:  deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'
       },
-      tags: `COD, ${cleanWilaya}, ${deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'}, REF-${ref}`,
+      tags: `COD, ${cleanWilaya}, ${deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'}, REF-${ref}, src-${orderSource}`,
       send_receipt: false,
       send_fulfillment_receipt: false,
       use_customer_default_address: false
