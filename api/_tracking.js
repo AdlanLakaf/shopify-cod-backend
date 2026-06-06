@@ -91,7 +91,7 @@ async function trackGA4({ ref, total, unitPrice, variantId, quantity, productTit
 
 // ── Meta CAPI — Purchase ──────────────────────────────────────────────────────
 
-async function trackMeta({ ref, total, variantId, quantity, productTitle, contentCategory, phone, name, city, state, fbp, fbc, externalId, gclid, eventId, sourceUrl, ip, userAgent }) {
+async function trackMeta({ ref, total, variantId, quantity, productTitle, contentCategory, phone, name, city, state, fbp, fbc, externalId, gclid, eventId, sourceUrl, ip, userAgent, metaTestCode }) {
   const tag = '[Meta CAPI][Purchase]';
   const PIXEL_ID     = process.env.META_PIXEL_ID;
   const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
@@ -120,7 +120,9 @@ async function trackMeta({ ref, total, variantId, quantity, productTitle, conten
   if (gclid) eventPayload.referrer_url = sourceUrl || '';
 
   const body = { data: [eventPayload] };
-  if (META_TEST_EVENT_CODE) body.test_event_code = META_TEST_EVENT_CODE;
+  // null = explicitly skipped by caller (production or staff skip) — never fall back to env var
+  const _metaPurchaseCode = metaTestCode !== undefined ? (metaTestCode || undefined) : (META_TEST_EVENT_CODE || undefined);
+  if (_metaPurchaseCode) body.test_event_code = _metaPurchaseCode;
 
   log(`${tag} firing — ref:${ref} value:${customData.value} DZD ip:${maskIp(ip)}`);
 
@@ -171,7 +173,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, cont
     headers: { 'Content-Type': 'application/json', 'Access-Token': ACCESS_TOKEN },
     body: JSON.stringify({
       pixel_code: PIXEL_ID, event_source: 'web', event_source_id: PIXEL_ID,
-      test_event_code: tiktokTestCode || TIKTOK_TEST_EVENT_CODE || undefined,
+      test_event_code: tiktokTestCode !== undefined ? (tiktokTestCode || undefined) : (TIKTOK_TEST_EVENT_CODE || undefined),
       data: [{ event: 'Purchase', event_time: Math.floor(Date.now() / 1000), event_id: eventId || ref, user,
         page: { url: sourceUrl || '' },
         properties: props
@@ -208,7 +210,7 @@ async function trackMetaEvent({ eventName, value, variantId, quantity, productTi
 
   const body = { data: [{ event_name: eventName, event_time: Math.floor(Date.now() / 1000), event_id: eventId || undefined,
     event_source_url: sourceUrl || '', action_source: 'website', user_data: userData, custom_data: customData }] };
-  const _metaCode = metaTestCode || META_TEST_EVENT_CODE;
+  const _metaCode = metaTestCode !== undefined ? (metaTestCode || undefined) : (META_TEST_EVENT_CODE || undefined);
   if (_metaCode) body.test_event_code = _metaCode;
 
   console.log(`${tag} firing — value:${val} DZD ip:${maskIp(ip)}`);
@@ -260,7 +262,7 @@ async function trackTikTokEvent({ eventName, value, variantId, quantity, product
     headers: { 'Content-Type': 'application/json', 'Access-Token': ACCESS_TOKEN },
     body: JSON.stringify({
       pixel_code: PIXEL_ID, event_source: 'web', event_source_id: PIXEL_ID,
-      test_event_code: tiktokTestCode || TIKTOK_TEST_EVENT_CODE || undefined,
+      test_event_code: tiktokTestCode !== undefined ? (tiktokTestCode || undefined) : (TIKTOK_TEST_EVENT_CODE || undefined),
       data: [{ event: eventName, event_time: Math.floor(Date.now() / 1000), event_id: eventId || undefined, user,
         page: { url: sourceUrl || '' },
         properties: props
