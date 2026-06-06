@@ -53,7 +53,9 @@ export default async function handler(req, res) {
     referrer        = '',
     trafficSource   = '',
     productTitle    = '',
-    contentCategory = ''
+    contentCategory = '',
+    brand           = '',
+    description     = ''
   } = req.body;
 
   if (!variantId || !name || !phone || !wilaya || !baladiya) {
@@ -218,6 +220,8 @@ await trackPurchase({
   sourceUrl,
   productTitle,
   contentCategory,
+  brand,
+  description,
   ip:              req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
   userAgent:       req.headers['user-agent'] || ''
 }).catch(err => console.error('[order] trackPurchase error:', err.message));

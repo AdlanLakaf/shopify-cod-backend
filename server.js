@@ -12,6 +12,7 @@ import getDeliveryRatesHandler from './api/get-delivery-rates.js';
 import getStopdesksHandler     from './api/get-stopdesks.js';
 import trackEventHandler       from './api/track-event.js';
 import countHubsHandler        from './api/count-hubs.js';
+import logErrorHandler         from './api/log-error.js';
 import { syncPageData }        from './api/sync-page-data.js';
 
 const app  = express();
@@ -64,6 +65,7 @@ app.all('/api/get-delivery-rates', getDeliveryRatesHandler);
 app.all('/api/get-stopdesks',      getStopdesksHandler);
 app.all('/api/track-event',        trackEventHandler);
 app.all('/api/count-hubs',         countHubsHandler);
+app.all('/api/log-error',          logErrorHandler);
 
 // ── Manual sync trigger (protected with ADMIN_SECRET bearer token) ────────────
 app.post('/api/admin/sync-page-data', async (req, res) => {

@@ -46,12 +46,13 @@ function buildMetaUserData({ phone, name, city, state, fbp, fbc, externalId, ip,
   return userData;
 }
 
-function buildTikTokUser({ phone, ttp, ttclid, ip, userAgent }) {
+function buildTikTokUser({ phone, ttp, ttclid, ip, userAgent, externalId }) {
   const user = { ip: ip || '', user_agent: userAgent || '' };
   const e164 = toE164DZ(phone);
-  if (e164)   user.phone  = sha256(e164);
-  if (ttp)    user.ttp    = ttp;
-  if (ttclid) user.ttclid = ttclid;
+  if (e164)       user.phone       = sha256(e164);
+  if (ttp)        user.ttp         = ttp;
+  if (ttclid)     user.ttclid      = ttclid;
+  if (externalId) user.external_id = sha256(String(externalId));
   return user;
 }
 
@@ -136,7 +137,7 @@ async function trackMeta({ ref, total, variantId, quantity, productTitle, conten
 
 // ── TikTok Events API — Purchase ─────────────────────────────────────────────
 
-async function trackTikTok({ ref, total, variantId, quantity, productTitle, phone, ttp, ttclid, eventId, sourceUrl, ip, userAgent }) {
+async function trackTikTok({ ref, total, variantId, quantity, productTitle, contentCategory, brand, description, phone, ttp, ttclid, externalId, eventId, sourceUrl, ip, userAgent }) {
   const tag = '[TikTok][Purchase]';
   const PIXEL_ID     = process.env.TIKTOK_PIXEL_ID;
   const ACCESS_TOKEN = process.env.TIKTOK_ACCESS_TOKEN;
@@ -145,10 +146,25 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, phon
   if (!PIXEL_ID)     { console.warn(`${tag} SKIP — TIKTOK_PIXEL_ID missing`); return; }
   if (!ACCESS_TOKEN) { console.warn(`${tag} SKIP — TIKTOK_ACCESS_TOKEN missing`); return; }
 
-  const user  = buildTikTokUser({ phone, ttp, ttclid, ip, userAgent });
-  const price = parseFloat(total) || 0;
+  const user      = buildTikTokUser({ phone, ttp, ttclid, ip, userAgent, externalId });
+  const value     = parseFloat(total) || 0;
+  const qty       = parseInt(quantity) || 1;
+  const unitPrice = Number((value / qty).toFixed(2));
 
-  log(`${tag} firing — ref:${ref} value:${price} DZD ip:${maskIp(ip)}`);
+  const props = {
+    currency:  'DZD',
+    value,
+    order_id:  ref,
+    price:     unitPrice,
+    num_items: qty,
+    contents:  [{ content_id: String(variantId), content_type: 'product', content_name: productTitle || '', quantity: qty, price: unitPrice }]
+  };
+  if (brand)           props.brand            = brand;
+  if (contentCategory) props.content_category = contentCategory;
+  if (productTitle)    props.content_name     = productTitle;
+  if (description)     props.description      = description;
+
+  log(`${tag} firing — ref:${ref} value:${value} DZD ip:${maskIp(ip)}`);
 
   const res  = await fetchWithTimeout('https://business-api.tiktok.com/open_api/v1.3/event/track/', {
     method: 'POST',
@@ -158,9 +174,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, phon
       test_event_code: TIKTOK_TEST_EVENT_CODE || undefined,
       data: [{ event: 'Purchase', event_time: Math.floor(Date.now() / 1000), event_id: eventId || ref, user,
         page: { url: sourceUrl || '' },
-        properties: { currency: 'DZD', value: price, order_id: ref,
-          contents: [{ content_id: String(variantId), content_type: 'product', content_name: productTitle || '', quantity: parseInt(quantity) || 1, price }]
-        }
+        properties: props
       }]
     })
   }, 10_000);
@@ -211,7 +225,7 @@ async function trackMetaEvent({ eventName, value, variantId, quantity, productTi
 
 // ── TikTok Events API — Funnel event ─────────────────────────────────────────
 
-async function trackTikTokEvent({ eventName, value, variantId, quantity, productTitle, searchString, phone, ttp, ttclid, eventId, sourceUrl, ip, userAgent }) {
+async function trackTikTokEvent({ eventName, value, variantId, quantity, productTitle, contentCategory, brand, description, searchString, phone, ttp, ttclid, externalId, eventId, sourceUrl, ip, userAgent }) {
   const tag = `[TikTok][${eventName}]`;
   const PIXEL_ID     = process.env.TIKTOK_PIXEL_ID;
   const ACCESS_TOKEN = process.env.TIKTOK_ACCESS_TOKEN;
@@ -220,11 +234,25 @@ async function trackTikTokEvent({ eventName, value, variantId, quantity, product
   if (!PIXEL_ID)     { console.warn(`${tag} SKIP — TIKTOK_PIXEL_ID missing`); return; }
   if (!ACCESS_TOKEN) { console.warn(`${tag} SKIP — TIKTOK_ACCESS_TOKEN missing`); return; }
 
-  const user = buildTikTokUser({ phone, ttp, ttclid, ip, userAgent });
-  const val  = parseFloat(value) || 0;
-  const qty  = parseInt(quantity) || 1;
+  const user      = buildTikTokUser({ phone, ttp, ttclid, ip, userAgent, externalId });
+  const val       = parseFloat(value) || 0;
+  const qty       = parseInt(quantity) || 1;
+  const unitPrice = Number((val / qty).toFixed(2));
 
-  console.log(`${tag} firing — value:${val} DZD ip:${maskIp(ip)}`);
+  const props = {
+    currency:  'DZD',
+    value:     val,
+    price:     unitPrice,
+    num_items: qty,
+    contents:  variantId ? [{ content_id: String(variantId), content_type: 'product', content_name: productTitle || '', quantity: qty, price: unitPrice }] : []
+  };
+  if (brand)           props.brand            = brand;
+  if (contentCategory) props.content_category = contentCategory;
+  if (productTitle)    props.content_name     = productTitle;
+  if (description)     props.description      = description;
+  if (eventName === 'Search' && searchString) props.search_string = searchString;
+
+  log(`${tag} firing — value:${val} DZD ip:${maskIp(ip)}`);
 
   const res  = await fetchWithTimeout('https://business-api.tiktok.com/open_api/v1.3/event/track/', {
     method: 'POST',
@@ -234,12 +262,7 @@ async function trackTikTokEvent({ eventName, value, variantId, quantity, product
       test_event_code: TIKTOK_TEST_EVENT_CODE || undefined,
       data: [{ event: eventName, event_time: Math.floor(Date.now() / 1000), event_id: eventId || undefined, user,
         page: { url: sourceUrl || '' },
-        properties: Object.assign(
-          { currency: 'DZD', value: val,
-            contents: variantId ? [{ content_id: String(variantId), content_type: 'product', content_name: productTitle || '', quantity: qty, price: Number((val / qty).toFixed(2)) }] : []
-          },
-          eventName === 'Search' && searchString ? { query: searchString } : {}
-        )
+        properties: props
       }]
     })
   }, 10_000);
@@ -261,7 +284,7 @@ export async function trackPurchase(data) {
   });
 }
 
-const META_ONLY = new Set(['FindLocation']);
+const META_ONLY = new Set(); // FindLocation now also goes to TikTok
 
 export async function trackEvent(data) {
   log(`[tracking] ${data.eventName} — Meta:${!!(process.env.META_PIXEL_ID && process.env.META_ACCESS_TOKEN)} TikTok:${!!(process.env.TIKTOK_PIXEL_ID && process.env.TIKTOK_ACCESS_TOKEN)}`);
