@@ -49,7 +49,9 @@ export default async function handler(req, res) {
     ttp             = '',
     ttclid          = '',
     externalId      = '',
-    sourceUrl       = ''
+    sourceUrl       = '',
+    metaTestCode    = '',
+    tiktokTestCode  = ''
   } = req.body || {};
 
   // ── Inbound log so every invocation is identifiable in Vercel logs ──
@@ -90,6 +92,8 @@ export default async function handler(req, res) {
     ttclid,
     externalId,
     sourceUrl,
+    metaTestCode:   testMode?.metaMode   === 'test' ? (metaTestCode   || null) : null,
+    tiktokTestCode: testMode?.tiktokMode === 'test' ? (tiktokTestCode || null) : null,
     ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
     userAgent: req.headers['user-agent'] || ''
   }).catch(err => console.error('[track-event] error:', err.message));

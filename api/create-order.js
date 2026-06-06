@@ -239,6 +239,8 @@ await trackPurchase({
   contentCategory,
   brand,
   description,
+  metaTestCode:   testMode?.metaMode   === 'test' ? (testMode.metaTestCode   || null) : null,
+  tiktokTestCode: testMode?.tiktokMode === 'test' ? (testMode.tiktokTestCode || null) : null,
   ip:              req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
   userAgent:       req.headers['user-agent'] || ''
 }).catch(err => console.error('[order] trackPurchase error:', err.message));

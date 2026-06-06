@@ -137,7 +137,7 @@ async function trackMeta({ ref, total, variantId, quantity, productTitle, conten
 
 // ── TikTok Events API — Purchase ─────────────────────────────────────────────
 
-async function trackTikTok({ ref, total, variantId, quantity, productTitle, contentCategory, brand, description, phone, ttp, ttclid, externalId, eventId, sourceUrl, ip, userAgent }) {
+async function trackTikTok({ ref, total, variantId, quantity, productTitle, contentCategory, brand, description, phone, ttp, ttclid, externalId, eventId, sourceUrl, ip, userAgent, tiktokTestCode }) {
   const tag = '[TikTok][Purchase]';
   const PIXEL_ID     = process.env.TIKTOK_PIXEL_ID;
   const ACCESS_TOKEN = process.env.TIKTOK_ACCESS_TOKEN;
@@ -171,7 +171,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, cont
     headers: { 'Content-Type': 'application/json', 'Access-Token': ACCESS_TOKEN },
     body: JSON.stringify({
       pixel_code: PIXEL_ID, event_source: 'web', event_source_id: PIXEL_ID,
-      test_event_code: TIKTOK_TEST_EVENT_CODE || undefined,
+      test_event_code: tiktokTestCode || TIKTOK_TEST_EVENT_CODE || undefined,
       data: [{ event: 'Purchase', event_time: Math.floor(Date.now() / 1000), event_id: eventId || ref, user,
         page: { url: sourceUrl || '' },
         properties: props
@@ -187,7 +187,7 @@ async function trackTikTok({ ref, total, variantId, quantity, productTitle, cont
 
 // ── Meta CAPI — Funnel event ──────────────────────────────────────────────────
 
-async function trackMetaEvent({ eventName, value, variantId, quantity, productTitle, contentCategory, searchString, phone, name, city, state, fbp, fbc, externalId, eventId, sourceUrl, ip, userAgent }) {
+async function trackMetaEvent({ eventName, value, variantId, quantity, productTitle, contentCategory, searchString, phone, name, city, state, fbp, fbc, externalId, eventId, sourceUrl, ip, userAgent, metaTestCode }) {
   const tag = `[Meta CAPI][${eventName}]`;
   const PIXEL_ID     = process.env.META_PIXEL_ID;
   const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
@@ -208,7 +208,8 @@ async function trackMetaEvent({ eventName, value, variantId, quantity, productTi
 
   const body = { data: [{ event_name: eventName, event_time: Math.floor(Date.now() / 1000), event_id: eventId || undefined,
     event_source_url: sourceUrl || '', action_source: 'website', user_data: userData, custom_data: customData }] };
-  if (META_TEST_EVENT_CODE) body.test_event_code = META_TEST_EVENT_CODE;
+  const _metaCode = metaTestCode || META_TEST_EVENT_CODE;
+  if (_metaCode) body.test_event_code = _metaCode;
 
   console.log(`${tag} firing — value:${val} DZD ip:${maskIp(ip)}`);
 
@@ -225,7 +226,7 @@ async function trackMetaEvent({ eventName, value, variantId, quantity, productTi
 
 // ── TikTok Events API — Funnel event ─────────────────────────────────────────
 
-async function trackTikTokEvent({ eventName, value, variantId, quantity, productTitle, contentCategory, brand, description, searchString, phone, ttp, ttclid, externalId, eventId, sourceUrl, ip, userAgent }) {
+async function trackTikTokEvent({ eventName, value, variantId, quantity, productTitle, contentCategory, brand, description, searchString, phone, ttp, ttclid, externalId, eventId, sourceUrl, ip, userAgent, tiktokTestCode }) {
   const tag = `[TikTok][${eventName}]`;
   const PIXEL_ID     = process.env.TIKTOK_PIXEL_ID;
   const ACCESS_TOKEN = process.env.TIKTOK_ACCESS_TOKEN;
@@ -259,7 +260,7 @@ async function trackTikTokEvent({ eventName, value, variantId, quantity, product
     headers: { 'Content-Type': 'application/json', 'Access-Token': ACCESS_TOKEN },
     body: JSON.stringify({
       pixel_code: PIXEL_ID, event_source: 'web', event_source_id: PIXEL_ID,
-      test_event_code: TIKTOK_TEST_EVENT_CODE || undefined,
+      test_event_code: tiktokTestCode || TIKTOK_TEST_EVENT_CODE || undefined,
       data: [{ event: eventName, event_time: Math.floor(Date.now() / 1000), event_id: eventId || undefined, user,
         page: { url: sourceUrl || '' },
         properties: props
@@ -277,7 +278,7 @@ async function trackTikTokEvent({ eventName, value, variantId, quantity, product
 
 export async function trackPurchase(data) {
   log(`[tracking] Purchase — ref:${data.ref} GA4:${!!(process.env.GA4_MEASUREMENT_ID && process.env.GA4_API_SECRET)} Meta:${!!(process.env.META_PIXEL_ID && process.env.META_ACCESS_TOKEN)} TikTok:${!!(process.env.TIKTOK_PIXEL_ID && process.env.TIKTOK_ACCESS_TOKEN)}`);
-  const results = await Promise.allSettled([ trackGA4(data), trackMeta(data), trackTikTok(data) ]);
+  const results = await Promise.allSettled([ trackGA4(data), trackMeta({ ...data, metaTestCode: data.metaTestCode }), trackTikTok({ ...data, tiktokTestCode: data.tiktokTestCode }) ]);
   results.forEach((r, i) => {
     if (r.status === 'rejected')
       console.error(`[tracking][${['GA4', 'Meta', 'TikTok'][i]}] Purchase FAILED:`, r.reason?.message);
@@ -288,9 +289,9 @@ const META_ONLY = new Set(); // FindLocation now also goes to TikTok
 
 export async function trackEvent(data) {
   log(`[tracking] ${data.eventName} — Meta:${!!(process.env.META_PIXEL_ID && process.env.META_ACCESS_TOKEN)} TikTok:${!!(process.env.TIKTOK_PIXEL_ID && process.env.TIKTOK_ACCESS_TOKEN)}`);
-  const tasks     = [trackMetaEvent(data)];
+  const tasks     = [trackMetaEvent({ ...data, metaTestCode: data.metaTestCode })];
   const platforms = ['Meta'];
-  if (!META_ONLY.has(data.eventName)) { tasks.push(trackTikTokEvent(data)); platforms.push('TikTok'); }
+  if (!META_ONLY.has(data.eventName)) { tasks.push(trackTikTokEvent({ ...data, tiktokTestCode: data.tiktokTestCode })); platforms.push('TikTok'); }
   const results = await Promise.allSettled(tasks);
   results.forEach((r, i) => {
     if (r.status === 'rejected')
