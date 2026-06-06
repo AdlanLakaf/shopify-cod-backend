@@ -12,6 +12,7 @@
 
 import { runSecurityChecks, log } from './_security.js';
 import { trackEvent } from './_tracking.js';
+import { getTestMode } from './_test-mode.js';
 
 // Only these standard events may be relayed
 const ALLOWED_EVENTS = new Set([
@@ -57,6 +58,14 @@ export default async function handler(req, res) {
   if (!ALLOWED_EVENTS.has(event)) {
     console.warn('[track-event] REJECTED — unsupported event:', JSON.stringify(event));
     return res.status(400).json({ error: 'Unsupported event' });
+  }
+
+  // ── Apply test mode overrides ──
+  const testMode = getTestMode(req.body || {});
+  if (testMode) {
+    if (testMode.metaMode === 'skip' && testMode.tiktokMode === 'skip') {
+      return res.status(200).json({ ok: true, _test: 'skipped' });
+    }
   }
 
   // ── Awaited so Vercel doesn't cut the request off before the beacons send ──

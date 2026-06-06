@@ -8,13 +8,17 @@
 import { runSecurityChecks, verifyTurnstile, fetchWithTimeout, log } from './_security.js';
 import { trackPurchase } from './_tracking.js';
 import { detectSource }  from './_attribution.js';
+import { getTestMode }   from './_test-mode.js';
 
 export default async function handler(req, res) {
   const blocked = runSecurityChecks(req, res, { skipHmac: true });
   if (blocked) return;
-  // ── Turnstile bot check ──
-  const turnstileBlock = await verifyTurnstile(req, res);
-  if (turnstileBlock) return;
+  // ── Staff test mode — skip Turnstile if valid staff token present ──
+  const testMode = getTestMode(req.body || {});
+  if (!testMode) {
+    const turnstileBlock = await verifyTurnstile(req, res);
+    if (turnstileBlock) return;
+  }
   
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -94,6 +98,13 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid variant ID' });
   }
 
+  // ── Mock mode: skip Shopify entirely, return fake response ──
+  if (testMode?.orderMode === 'mock') {
+    const fakeRef = 'H&N-TEST-' + Date.now().toString(36).toUpperCase().slice(-6);
+    log(`[test] mock order: ${fakeRef}`);
+    return res.status(200).json({ success: true, ref: fakeRef, orderId: 0, orderName: fakeRef, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: String(shippingCost || 0), lineItems: [], _test: true });
+  }
+
   const orderNote = [
     `REF: ${ref}`,
     `الاسم: ${cleanName}`,
@@ -128,7 +139,7 @@ export default async function handler(req, res) {
         price: (typeof shippingCost === 'number' && shippingCost >= 0) ? shippingCost.toFixed(2) : '0.00',
         code:  deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'
       },
-      tags: `COD, ${cleanWilaya}, ${deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'}, REF-${ref}, src-${orderSource}`,
+      tags: `COD, ${cleanWilaya}, ${deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'}, REF-${ref}, src-${orderSource}${testMode ? ', TEST, DO-NOT-FULFILL' : ''}`,
       send_receipt: false,
       send_fulfillment_receipt: false,
       use_customer_default_address: false
@@ -154,6 +165,12 @@ export default async function handler(req, res) {
     const draftData = await draftRes.json();
     draftId = draftData.draft_order.id;
     log('Draft order created:', draftId);
+
+    // ── Draft-only mode: stop here, don't complete (no stock deduction) ──
+    if (testMode?.orderMode === 'draft') {
+      log(`[test] draft-only order: ${draftId}`);
+      return res.status(200).json({ success: true, ref, orderId: 0, orderName: ref, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: String(shippingCost || 0), lineItems: [], _test: true });
+    }
   } catch (err) {
     console.error('Network error creating draft:', err);
     return res.status(500).json({ error: 'Network error' });
