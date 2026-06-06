@@ -98,10 +98,27 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid variant ID' });
   }
 
+  // ── Shared tracking helper for mock / draft modes ──
+  const fireTestTracking = (ref, total) => trackPurchase({
+    ref, total, unitPrice: '0',
+    variantId: variantIdInt, quantity: Math.min(parseInt(quantity) || 1, 10),
+    phone: cleanPhone, name: cleanName, city: cleanBaladiya, state: cleanWilaya,
+    eventId: eventId || ref, fbp, fbc, externalId, ttp, ttclid, sourceUrl,
+    productTitle, contentCategory, brand, description,
+    skipGA4:    true,
+    skipMeta:   testMode.metaMode   === 'skip',
+    skipTikTok: testMode.tiktokMode === 'skip',
+    metaTestCode:   testMode.metaMode   === 'test' ? (testMode.metaTestCode   || null) : null,
+    tiktokTestCode: testMode.tiktokMode === 'test' ? (testMode.tiktokTestCode || null) : null,
+    ip: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || '',
+    userAgent: req.headers['user-agent'] || ''
+  }).catch(err => console.error('[test] trackPurchase error:', err.message));
+
   // ── Mock mode: skip Shopify entirely, return fake response ──
   if (testMode?.orderMode === 'mock') {
     const fakeRef = 'H&N-TEST-' + Date.now().toString(36).toUpperCase().slice(-6);
     log(`[test] mock order: ${fakeRef}`);
+    await fireTestTracking(fakeRef, String(shippingCost || 0));
     return res.status(200).json({ success: true, ref: fakeRef, orderId: 0, orderName: fakeRef, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: String(shippingCost || 0), lineItems: [], _test: true });
   }
 
@@ -169,7 +186,9 @@ export default async function handler(req, res) {
     // ── Draft-only mode: stop here, don't complete (no stock deduction) ──
     if (testMode?.orderMode === 'draft') {
       log(`[test] draft-only order: ${draftId}`);
-      return res.status(200).json({ success: true, ref, orderId: 0, orderName: ref, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: String(shippingCost || 0), lineItems: [], _test: true });
+      const draftTotal = String(draftData.draft_order?.total_price || shippingCost || 0);
+      await fireTestTracking(ref, draftTotal);
+      return res.status(200).json({ success: true, ref, orderId: 0, orderName: ref, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: draftTotal, lineItems: [], _test: true });
     }
   } catch (err) {
     console.error('Network error creating draft:', err);
@@ -239,6 +258,9 @@ await trackPurchase({
   contentCategory,
   brand,
   description,
+  skipGA4:        testMode?.ga4Mode    === 'skip',
+  skipMeta:       testMode?.metaMode   === 'skip',
+  skipTikTok:     testMode?.tiktokMode === 'skip',
   metaTestCode:   testMode?.metaMode   === 'test' ? (testMode.metaTestCode   || null) : null,
   tiktokTestCode: testMode?.tiktokMode === 'test' ? (testMode.tiktokTestCode || null) : null,
   ip:              req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',

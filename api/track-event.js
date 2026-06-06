@@ -64,11 +64,6 @@ export default async function handler(req, res) {
 
   // ── Apply test mode overrides ──
   const testMode = getTestMode(req.body || {});
-  if (testMode) {
-    if (testMode.metaMode === 'skip' && testMode.tiktokMode === 'skip') {
-      return res.status(200).json({ ok: true, _test: 'skipped' });
-    }
-  }
 
   // ── Awaited so Vercel doesn't cut the request off before the beacons send ──
   await trackEvent({
@@ -92,6 +87,8 @@ export default async function handler(req, res) {
     ttclid,
     externalId,
     sourceUrl,
+    skipMeta:       testMode?.metaMode   === 'skip',
+    skipTikTok:     testMode?.tiktokMode === 'skip',
     metaTestCode:   testMode?.metaMode   === 'test' ? (metaTestCode   || null) : null,
     tiktokTestCode: testMode?.tiktokMode === 'test' ? (tiktokTestCode || null) : null,
     ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',

@@ -277,21 +277,25 @@ async function trackTikTokEvent({ eventName, value, variantId, quantity, product
 // ── Public exports ────────────────────────────────────────────────────────────
 
 export async function trackPurchase(data) {
-  log(`[tracking] Purchase — ref:${data.ref} GA4:${!!(process.env.GA4_MEASUREMENT_ID && process.env.GA4_API_SECRET)} Meta:${!!(process.env.META_PIXEL_ID && process.env.META_ACCESS_TOKEN)} TikTok:${!!(process.env.TIKTOK_PIXEL_ID && process.env.TIKTOK_ACCESS_TOKEN)}`);
-  const results = await Promise.allSettled([ trackGA4(data), trackMeta({ ...data, metaTestCode: data.metaTestCode }), trackTikTok({ ...data, tiktokTestCode: data.tiktokTestCode }) ]);
+  const tasks = [], labels = [];
+  if (!data.skipGA4)    { tasks.push(trackGA4(data));                                                  labels.push('GA4');    }
+  if (!data.skipMeta)   { tasks.push(trackMeta({ ...data, metaTestCode: data.metaTestCode }));          labels.push('Meta');   }
+  if (!data.skipTikTok) { tasks.push(trackTikTok({ ...data, tiktokTestCode: data.tiktokTestCode }));    labels.push('TikTok'); }
+  log(`[tracking] Purchase — ref:${data.ref} firing:[${labels.join(',')}]`);
+  const results = await Promise.allSettled(tasks);
   results.forEach((r, i) => {
     if (r.status === 'rejected')
-      console.error(`[tracking][${['GA4', 'Meta', 'TikTok'][i]}] Purchase FAILED:`, r.reason?.message);
+      console.error(`[tracking][${labels[i]}] Purchase FAILED:`, r.reason?.message);
   });
 }
 
 const META_ONLY = new Set(); // FindLocation now also goes to TikTok
 
 export async function trackEvent(data) {
-  log(`[tracking] ${data.eventName} — Meta:${!!(process.env.META_PIXEL_ID && process.env.META_ACCESS_TOKEN)} TikTok:${!!(process.env.TIKTOK_PIXEL_ID && process.env.TIKTOK_ACCESS_TOKEN)}`);
-  const tasks     = [trackMetaEvent({ ...data, metaTestCode: data.metaTestCode })];
-  const platforms = ['Meta'];
-  if (!META_ONLY.has(data.eventName)) { tasks.push(trackTikTokEvent({ ...data, tiktokTestCode: data.tiktokTestCode })); platforms.push('TikTok'); }
+  const tasks = [], platforms = [];
+  if (!data.skipMeta)   { tasks.push(trackMetaEvent({ ...data, metaTestCode: data.metaTestCode }));                                              platforms.push('Meta');   }
+  if (!data.skipTikTok && !META_ONLY.has(data.eventName)) { tasks.push(trackTikTokEvent({ ...data, tiktokTestCode: data.tiktokTestCode }));     platforms.push('TikTok'); }
+  log(`[tracking] ${data.eventName} — firing:[${platforms.join(',')}]`);
   const results = await Promise.allSettled(tasks);
   results.forEach((r, i) => {
     if (r.status === 'rejected')
