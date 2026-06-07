@@ -15,6 +15,7 @@ export default async function handler(req, res) {
   if (blocked) return;
   // ── Staff test mode — skip Turnstile if valid staff token present ──
   const testMode = getTestMode(req.body || {});
+  // TURNSTILE DISABLED — verifyTurnstile is a no-op stub; call kept for easy re-enable
   if (!testMode) {
     const turnstileBlock = await verifyTurnstile(req, res);
     if (turnstileBlock) return;
@@ -213,59 +214,67 @@ export default async function handler(req, res) {
     const order        = completeData.draft_order;
     log('Order completed:', order.order_id);
 
-   // ── Fetch full order to get line_items ──
-let fullOrder = null;
+   // ── Run tracking + full-order fetch concurrently — saves ~300 ms for the user ──
+// tracking uses order.total_price (same value as full order) and a computed unit price.
+const qty = Math.min(parseInt(quantity) || 1, 10);
+const totalFloat = parseFloat(order.total_price || 0);
+const shippingFloat = parseFloat(shippingCost) || 0;
+const computedUnitPrice = String(((totalFloat - shippingFloat) / qty).toFixed(2));
 
-try {
-  const fullOrderRes = await fetchWithTimeout(
-    `https://${SHOP}/admin/api/${API_VER}/orders/${order.order_id}.json`,
-    { headers: { 'X-Shopify-Access-Token': TOKEN } },
-    10_000
-  );
+const [trackResult, fullOrderResult] = await Promise.allSettled([
+  trackPurchase({
+    ref,
+    total:           order.total_price || '0',
+    unitPrice:       computedUnitPrice,
+    variantId:       variantIdInt,
+    quantity:        qty,
+    phone:           cleanPhone,
+    name:            cleanName,
+    city:            cleanBaladiya,
+    state:           cleanWilaya,
+    eventId:         eventId || ref,
+    fbp,
+    fbc,
+    gaClientId,
+    sessionId,
+    externalId,
+    ttp,
+    ttclid,
+    gclid,
+    sourceUrl,
+    productTitle,
+    contentCategory,
+    brand,
+    description,
+    skipGA4:        testMode?.ga4Mode    === 'skip',
+    skipMeta:       testMode?.metaMode   === 'skip',
+    skipTikTok:     testMode?.tiktokMode === 'skip',
+    metaTestCode:   testMode?.metaMode   === 'test' ? (testMode.metaTestCode   || null) : null,
+    tiktokTestCode: testMode?.tiktokMode === 'test' ? (testMode.tiktokTestCode || null) : null,
+    ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
+    userAgent: req.headers['user-agent'] || ''
+  }),
+  (async () => {
+    try {
+      const r = await fetchWithTimeout(
+        `https://${SHOP}/admin/api/${API_VER}/orders/${order.order_id}.json`,
+        { headers: { 'X-Shopify-Access-Token': TOKEN } },
+        10_000
+      );
+      if (!r.ok) { console.error('Failed to fetch full order details:', order.order_id); return null; }
+      const d = await r.json();
+      return d.order;
+    } catch (err) {
+      console.error('Network error fetching full order:', err);
+      return null;
+    }
+  })()
+]);
 
-  if (!fullOrderRes.ok) {
-    console.error('Failed to fetch full order details:', order.order_id);
-  } else {
-    const fullOrderData = await fullOrderRes.json();
-    fullOrder = fullOrderData.order;
-  }
-} catch (err) {
-  console.error('Network error fetching full order:', err);
+if (trackResult.status === 'rejected') {
+  console.error('[order] trackPurchase error:', trackResult.reason?.message);
 }
-
-// ── Server-side conversion tracking — awaited so Vercel doesn't cut it off ──
-await trackPurchase({
-  ref,
-  total:           fullOrder?.total_price || order.total_price || '0',
-  unitPrice:       fullOrder?.line_items?.[0]?.price || '0',
-  variantId:       variantIdInt,
-  quantity:        Math.min(parseInt(quantity) || 1, 10),
-  phone:           cleanPhone,
-  name:            cleanName,
-  city:            cleanBaladiya,
-  state:           cleanWilaya,
-  eventId:         eventId || ref,
-  fbp,
-  fbc,
-  gaClientId,
-  sessionId,
-  externalId,
-  ttp,
-  ttclid,
-  gclid,
-  sourceUrl,
-  productTitle,
-  contentCategory,
-  brand,
-  description,
-  skipGA4:        testMode?.ga4Mode    === 'skip',
-  skipMeta:       testMode?.metaMode   === 'skip',
-  skipTikTok:     testMode?.tiktokMode === 'skip',
-  metaTestCode:   testMode?.metaMode   === 'test' ? (testMode.metaTestCode   || null) : null,
-  tiktokTestCode: testMode?.tiktokMode === 'test' ? (testMode.tiktokTestCode || null) : null,
-  ip:              req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
-  userAgent:       req.headers['user-agent'] || ''
-}).catch(err => console.error('[order] trackPurchase error:', err.message));
+const fullOrder = fullOrderResult.status === 'fulfilled' ? fullOrderResult.value : null;
 
 return res.status(200).json({
   success:      true,

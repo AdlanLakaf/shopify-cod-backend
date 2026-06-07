@@ -140,47 +140,48 @@ export function verifyHmac(req, res) {
   return null;
 }
 
-// ── 5. Turnstile bot verification ─────────────────────────────────────────────
-export async function verifyTurnstile(req, res) {
-  const SECRET = process.env.TURNSTILE_SECRET;
-
-  if (!SECRET) {
-    console.warn('TURNSTILE_SECRET not set — skipping bot check');
-    return null;
-  }
-
-  const token = req.body?.turnstileToken;
-  if (!token) {
-    return res.status(403).json({ error: 'Missing bot verification token' });
-  }
-
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
-
-  try {
-    const verifyRes = await fetchWithTimeout(
-      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
-      {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ secret: SECRET, response: token, remoteip: ip })
-      },
-      8_000
-    );
-
-    const data = await verifyRes.json();
-
-    if (!data.success) {
-      console.warn('Turnstile failed:', data['error-codes'], 'IP:', ip);
-      return res.status(403).json({ error: 'Bot verification failed' });
-    }
-
-    return null;
-  } catch (err) {
-    // Fail open only on Cloudflare timeout — don't block real users if Cloudflare is down
-    console.error('Turnstile verification error (failing open):', err.message);
-    return null;
-  }
-}
+// ── 5. Turnstile bot verification — DISABLED ─────────────────────────────────
+// export async function verifyTurnstile(req, res) {
+//   const SECRET = process.env.TURNSTILE_SECRET;
+//
+//   if (!SECRET) {
+//     console.warn('TURNSTILE_SECRET not set — skipping bot check');
+//     return null;
+//   }
+//
+//   const token = req.body?.turnstileToken;
+//   if (!token) {
+//     return res.status(403).json({ error: 'Missing bot verification token' });
+//   }
+//
+//   const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
+//
+//   try {
+//     const verifyRes = await fetchWithTimeout(
+//       'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+//       {
+//         method:  'POST',
+//         headers: { 'Content-Type': 'application/json' },
+//         body:    JSON.stringify({ secret: SECRET, response: token, remoteip: ip })
+//       },
+//       8_000
+//     );
+//
+//     const data = await verifyRes.json();
+//
+//     if (!data.success) {
+//       console.warn('Turnstile failed:', data['error-codes'], 'IP:', ip);
+//       return res.status(403).json({ error: 'Bot verification failed' });
+//     }
+//
+//     return null;
+//   } catch (err) {
+//     // Fail open only on Cloudflare timeout — don't block real users if Cloudflare is down
+//     console.error('Turnstile verification error (failing open):', err.message);
+//     return null;
+//   }
+// }
+export async function verifyTurnstile(_req, _res) { return null; } // TURNSTILE DISABLED — always passes
 
 // ── 6. Combined security check ────────────────────────────────────────────────
 export function runSecurityChecks(req, res, { skipHmac = false, anyOrigin = false } = {}) {
