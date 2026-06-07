@@ -7,7 +7,7 @@
 
 import { runSecurityChecks, verifyTurnstile, fetchWithTimeout, log } from './_security.js';
 import { trackPurchase } from './_tracking.js';
-import { detectSource }  from './_attribution.js';
+import { detectSource, resolveAdPlatform } from './_attribution.js';
 import { getTestMode }   from './_test-mode.js';
 
 export default async function handler(req, res) {
@@ -88,6 +88,8 @@ export default async function handler(req, res) {
     referrer:  sanitize(referrer)
   });
   log(`[order] source detected: ${orderSource}`);
+  // Attribution gate — only the hn_src 7-day window decides which CAPI fires.
+  const adPlatform = resolveAdPlatform(trafficSource);
 
   const algerianPhoneRegex = /^(05|06|07)\d{8}$/;
   if (!algerianPhoneRegex.test(cleanPhone)) {
@@ -246,9 +248,9 @@ const [trackResult, fullOrderResult] = await Promise.allSettled([
     contentCategory,
     brand,
     description,
-    skipGA4:        testMode?.ga4Mode    === 'skip',
-    skipMeta:       testMode?.metaMode   === 'skip',
-    skipTikTok:     testMode?.tiktokMode === 'skip',
+    skipGA4:    testMode?.ga4Mode === 'skip',
+    skipMeta:   testMode ? testMode.metaMode   === 'skip' : adPlatform !== 'meta',
+    skipTikTok: testMode ? testMode.tiktokMode === 'skip' : adPlatform !== 'tiktok',
     metaTestCode:   testMode?.metaMode   === 'test' ? (testMode.metaTestCode   || null) : null,
     tiktokTestCode: testMode?.tiktokMode === 'test' ? (testMode.tiktokTestCode || null) : null,
     ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',

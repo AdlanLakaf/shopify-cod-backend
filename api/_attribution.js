@@ -24,6 +24,19 @@ const VALID_SOURCES = new Set([
   'tiktok', 'google', 'meta', 'facebook', 'instagram'
 ]);
 
+// ── Attribution gate ─────────────────────────────────────────────────────────
+// Only hn_src (7-day TTL, last paid-click) counts for deciding which ad
+// platform gets the event.  The longer-lived click-ID cookies (_fbc, _ttclid,
+// 90 days) are intentionally NOT used here — they exist only for CAPI match
+// quality, not for the fire/skip decision.
+// Returns: 'tiktok' | 'meta' | 'google' | null (null = fire nothing)
+export function resolveAdPlatform(trafficSource) {
+  if (trafficSource === 'tiktok')                                                       return 'tiktok';
+  if (trafficSource === 'meta' || trafficSource === 'facebook' || trafficSource === 'instagram') return 'meta';
+  if (trafficSource === 'google')                                                       return 'google';
+  return null; // expired, organic, or direct → fire nothing
+}
+
 export function detectSource({ trafficSource, fbc, ttclid, gclid, userAgent = '', referrer = '' }) {
   // ── Primary: hn_src last-click cookie (set by scripts.liquid) ──
   if (trafficSource && VALID_SOURCES.has(trafficSource)) {

@@ -13,6 +13,7 @@
 import { runSecurityChecks, log } from './_security.js';
 import { trackEvent } from './_tracking.js';
 import { getTestMode } from './_test-mode.js';
+import { resolveAdPlatform } from './_attribution.js';
 
 // Only these standard events may be relayed
 const ALLOWED_EVENTS = new Set([
@@ -50,6 +51,7 @@ export default async function handler(req, res) {
     ttclid          = '',
     externalId      = '',
     sourceUrl       = '',
+    trafficSource   = '',
     metaTestCode    = '',
     tiktokTestCode  = ''
   } = req.body || {};
@@ -63,7 +65,8 @@ export default async function handler(req, res) {
   }
 
   // ── Apply test mode overrides ──
-  const testMode = getTestMode(req.body || {});
+  const testMode   = getTestMode(req.body || {});
+  const adPlatform = resolveAdPlatform(trafficSource); // null = fire nothing
 
   // ── Awaited so Vercel doesn't cut the request off before the beacons send ──
   await trackEvent({
@@ -87,8 +90,8 @@ export default async function handler(req, res) {
     ttclid,
     externalId,
     sourceUrl,
-    skipMeta:       testMode?.metaMode   === 'skip',
-    skipTikTok:     testMode?.tiktokMode === 'skip',
+    skipMeta:   testMode ? testMode.metaMode   === 'skip' : adPlatform !== 'meta',
+    skipTikTok: testMode ? testMode.tiktokMode === 'skip' : adPlatform !== 'tiktok',
     metaTestCode:   testMode?.metaMode   === 'test' ? (metaTestCode   || null) : null,
     tiktokTestCode: testMode?.tiktokMode === 'test' ? (tiktokTestCode || null) : null,
     ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
