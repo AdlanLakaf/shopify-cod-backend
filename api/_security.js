@@ -23,9 +23,14 @@ export async function fetchWithTimeout(url, options = {}, timeoutMs = 10_000) {
 }
 
 // ── Rate limit store ──────────────────────────────────────────────────────────
+// Keyed by "<bucket>:<ip>" so each endpoint gets its own budget. Limits are
+// deliberately high: Algerian mobile carriers use CGNAT, so one public IP is
+// shared by thousands of real customers — a tight per-IP cap blocks buyers,
+// not bots. (On Railway this Map lives in one persistent process shared by
+// ALL routes and ALL customers, which made the old shared 30/5min cap fatal.)
 const rateLimitStore = new Map();
 
-const RATE_LIMIT_MAX    = 30;
+const RATE_LIMIT_MAX    = 300;            // default per bucket+IP per window
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000;
 const TIMESTAMP_TTL     = 5 * 60 * 1000;
 const MAX_BODY_BYTES    = 5 * 1024;
@@ -65,24 +70,29 @@ export function setCorsHeaders(req, res, { anyOrigin = false } = {}) {
 }
 
 // ── 2. Rate limiting ──────────────────────────────────────────────────────────
-export function checkRateLimit(req, res) {
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+export function getClientIp(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0]?.trim()
     || req.socket?.remoteAddress
     || 'unknown';
+}
 
+export function checkRateLimit(req, res, { bucket = 'global', max = RATE_LIMIT_MAX } = {}) {
+  const key   = bucket + ':' + getClientIp(req);
   const now   = Date.now();
-  const entry = rateLimitStore.get(ip);
+  const entry = rateLimitStore.get(key);
 
   if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW) {
-    rateLimitStore.set(ip, { count: 1, windowStart: now });
+    rateLimitStore.set(key, { count: 1, windowStart: now });
     return null;
   }
 
-  if (entry.count >= RATE_LIMIT_MAX) {
+  if (entry.count >= max) {
     const retryAfter = Math.ceil((RATE_LIMIT_WINDOW - (now - entry.windowStart)) / 1000);
     res.setHeader('Retry-After', retryAfter);
+    console.warn(`[rate-limit] 429 bucket=${bucket} ip=${getClientIp(req)} count=${entry.count}`);
     return res.status(429).json({
-      error: `Too many requests. Try again in ${Math.ceil(retryAfter / 60)} minutes.`
+      error: `Too many requests. Try again in ${Math.ceil(retryAfter / 60)} minutes.`,
+      code:  'rate_limited'
     });
   }
 
@@ -184,7 +194,7 @@ export function verifyHmac(req, res) {
 export async function verifyTurnstile(_req, _res) { return null; } // TURNSTILE DISABLED — always passes
 
 // ── 6. Combined security check ────────────────────────────────────────────────
-export function runSecurityChecks(req, res, { skipHmac = false, anyOrigin = false } = {}) {
+export function runSecurityChecks(req, res, { skipHmac = false, anyOrigin = false, rateBucket = 'global', rateMax = RATE_LIMIT_MAX } = {}) {
   setCorsHeaders(req, res, { anyOrigin });
 
   if (req.method === 'OPTIONS') {
@@ -192,7 +202,7 @@ export function runSecurityChecks(req, res, { skipHmac = false, anyOrigin = fals
     return true;
   }
 
-  const rateLimitResult = checkRateLimit(req, res);
+  const rateLimitResult = checkRateLimit(req, res, { bucket: rateBucket, max: rateMax });
   if (rateLimitResult) return true;
 
   if (req.method === 'POST') {

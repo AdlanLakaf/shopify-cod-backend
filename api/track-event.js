@@ -15,15 +15,22 @@ import { trackEvent } from './_tracking.js';
 import { getTestMode } from './_test-mode.js';
 import { resolveAdPlatform } from './_attribution.js';
 
-// Only these standard events may be relayed
+// Only these events may be relayed
 const ALLOWED_EVENTS = new Set([
-  'ViewContent', 'InitiateCheckout', 'AddPaymentInfo', 'Search', 'FindLocation'
+  'ViewContent', 'InitiateCheckout', 'AddPaymentInfo', 'Search', 'FindLocation', 'CustomizeProduct'
+]);
+
+// Conversion / mid-funnel events that are gated by the hn_src attribution cookie.
+// Top-of-funnel events (ViewContent, Search) are NOT gated — they always fire to both
+// platforms because they're audience-building signals, not conversion claims.
+const GATED_EVENTS = new Set([
+  'InitiateCheckout', 'AddPaymentInfo', 'FindLocation', 'CustomizeProduct'
 ]);
 
 export default async function handler(req, res) {
   // anyOrigin: the Custom Pixel fires from a sandboxed iframe on a
   // different origin — this is a cookie-less beacon, so '*' is safe.
-  const blocked = runSecurityChecks(req, res, { skipHmac: true, anyOrigin: true });
+  const blocked = runSecurityChecks(req, res, { skipHmac: true, anyOrigin: true, rateBucket: 'beacon', rateMax: 600 });
   if (blocked) return;
 
   if (req.method !== 'POST') {
@@ -66,7 +73,25 @@ export default async function handler(req, res) {
 
   // ── Apply test mode overrides ──
   const testMode   = getTestMode(req.body || {});
-  const adPlatform = resolveAdPlatform(trafficSource); // null = fire nothing
+  const adPlatform = resolveAdPlatform(trafficSource);
+  const shouldGate = GATED_EVENTS.has(event);
+
+  // Attribution logic:
+  //  - Test mode: honour explicit skip/test flags, ignore attribution.
+  //  - Gated events (conversion signals): only fire to the attributed platform.
+  //  - Ungated events (ViewContent, Search): always fire to both — they are
+  //    audience-building signals and must mirror the browser pixel for de-dupe / EMQ.
+  let skipMeta, skipTikTok;
+  if (testMode) {
+    skipMeta   = testMode.metaMode   === 'skip';
+    skipTikTok = testMode.tiktokMode === 'skip';
+  } else if (shouldGate) {
+    skipMeta   = adPlatform !== 'meta';
+    skipTikTok = adPlatform !== 'tiktok';
+  } else {
+    skipMeta   = false;
+    skipTikTok = false;
+  }
 
   // ── Awaited so Vercel doesn't cut the request off before the beacons send ──
   await trackEvent({
@@ -90,8 +115,8 @@ export default async function handler(req, res) {
     ttclid,
     externalId,
     sourceUrl,
-    skipMeta:   testMode ? testMode.metaMode   === 'skip' : adPlatform !== 'meta',
-    skipTikTok: testMode ? testMode.tiktokMode === 'skip' : adPlatform !== 'tiktok',
+    skipMeta,
+    skipTikTok,
     metaTestCode:   testMode?.metaMode   === 'test' ? (metaTestCode   || null) : null,
     tiktokTestCode: testMode?.tiktokMode === 'test' ? (tiktokTestCode || null) : null,
     ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',

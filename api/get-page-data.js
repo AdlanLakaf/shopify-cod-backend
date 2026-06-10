@@ -180,7 +180,7 @@ async function fetchHubs(tenant, apiKey) {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
-  const blocked = runSecurityChecks(req, res, { skipHmac: true });
+  const blocked = runSecurityChecks(req, res, { skipHmac: true, rateBucket: 'pagedata', rateMax: 300 });
   if (blocked) return;
 
   if (req.method !== 'GET') {

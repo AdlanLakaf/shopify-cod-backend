@@ -10,8 +10,33 @@ import { trackPurchase } from './_tracking.js';
 import { detectSource, resolveAdPlatform } from './_attribution.js';
 import { getTestMode }   from './_test-mode.js';
 
+// ── Idempotency — the same eventId never creates two orders ──────────────────
+// The theme retries automatically on timeout/network failure; if the first
+// attempt actually reached Shopify, the retry gets the cached response back
+// instead of a duplicate order. Railway runs one persistent process, so an
+// in-memory Map is reliable here.
+const idempotencyStore = new Map(); // eventId → { ts, pending, status, body }
+const IDEM_TTL = 15 * 60 * 1000;
+setInterval(() => {
+  const cutoff = Date.now() - IDEM_TTL;
+  for (const [k, v] of idempotencyStore) {
+    if (v.ts < cutoff) idempotencyStore.delete(k);
+  }
+}, 5 * 60 * 1000).unref();
+
+// ── Per-phone order cap — the only spam guard a real buyer can never hit ─────
+const phoneOrderStore = new Map(); // phone → { count, windowStart }
+const PHONE_MAX_ORDERS = 6;
+const PHONE_WINDOW     = 60 * 60 * 1000;
+setInterval(() => {
+  const cutoff = Date.now() - PHONE_WINDOW;
+  for (const [k, v] of phoneOrderStore) {
+    if (v.windowStart < cutoff) phoneOrderStore.delete(k);
+  }
+}, 10 * 60 * 1000).unref();
+
 export default async function handler(req, res) {
-  const blocked = runSecurityChecks(req, res, { skipHmac: true });
+  const blocked = runSecurityChecks(req, res, { skipHmac: true, rateBucket: 'order', rateMax: 60 });
   if (blocked) return;
   // ── Staff test mode — skip Turnstile if valid staff token present ──
   const testMode = getTestMode(req.body || {});
@@ -101,6 +126,39 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid variant ID' });
   }
 
+  // ── Idempotency: duplicate submit with the same eventId ──
+  const idemKey = eventId && String(eventId).slice(0, 64);
+  if (idemKey) {
+    const seen = idempotencyStore.get(idemKey);
+    if (seen) {
+      if (seen.pending) {
+        // First attempt still running — tell the client to wait and re-ask
+        return res.status(409).json({ error: 'Order is already being processed', code: 'in_progress' });
+      }
+      log(`[order] idempotent replay for ${idemKey}`);
+      return res.status(seen.status).json(seen.body);
+    }
+    idempotencyStore.set(idemKey, { ts: Date.now(), pending: true });
+  }
+  // Cache the outcome (or clear on failure so a manual retry can try again)
+  const idemResolve = (status, body) => {
+    if (idemKey) {
+      if (status === 200) idempotencyStore.set(idemKey, { ts: Date.now(), pending: false, status, body });
+      else idempotencyStore.delete(idemKey);
+    }
+    return res.status(status).json(body);
+  };
+
+  // ── Per-phone cap (real orders only — test mode bypasses) ──
+  if (!testMode) {
+    const now   = Date.now();
+    const entry = phoneOrderStore.get(cleanPhone);
+    if (entry && now - entry.windowStart <= PHONE_WINDOW && entry.count >= PHONE_MAX_ORDERS) {
+      console.warn(`[order] phone cap hit: ${cleanPhone}`);
+      return idemResolve(429, { error: 'Order limit reached for this phone number. Please try later.', code: 'phone_limit' });
+    }
+  }
+
   // ── Shared tracking helper for mock / draft modes ──
   const fireTestTracking = (ref, total) => trackPurchase({
     ref, total, unitPrice: '0',
@@ -122,7 +180,7 @@ export default async function handler(req, res) {
     const fakeRef = 'H&N-TEST-' + Date.now().toString(36).toUpperCase().slice(-6);
     log(`[test] mock order: ${fakeRef}`);
     await fireTestTracking(fakeRef, String(shippingCost || 0));
-    return res.status(200).json({ success: true, ref: fakeRef, orderId: 0, orderName: fakeRef, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: String(shippingCost || 0), lineItems: [], _test: true });
+    return idemResolve(200, { success: true, ref: fakeRef, orderId: 0, orderName: fakeRef, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: String(shippingCost || 0), lineItems: [], _test: true });
   }
 
   const orderNote = [
@@ -180,7 +238,7 @@ export default async function handler(req, res) {
     );
     if (!draftRes.ok) {
       console.error('Draft order creation failed — HTTP', draftRes.status);
-      return res.status(502).json({ error: 'Failed to create draft order' });
+      return idemResolve(502, { error: 'Failed to create draft order' });
     }
     const draftData = await draftRes.json();
     draftId = draftData.draft_order.id;
@@ -191,11 +249,11 @@ export default async function handler(req, res) {
       log(`[test] draft-only order: ${draftId}`);
       const draftTotal = String(draftData.draft_order?.total_price || shippingCost || 0);
       await fireTestTracking(ref, draftTotal);
-      return res.status(200).json({ success: true, ref, orderId: 0, orderName: ref, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: draftTotal, lineItems: [], _test: true });
+      return idemResolve(200, { success: true, ref, orderId: 0, orderName: ref, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: draftTotal, lineItems: [], _test: true });
     }
   } catch (err) {
     console.error('Network error creating draft:', err);
-    return res.status(500).json({ error: 'Network error' });
+    return idemResolve(500, { error: 'Network error' });
   }
 
   try {
@@ -209,7 +267,7 @@ export default async function handler(req, res) {
     );
     if (!completeRes.ok) {
       console.error('Draft completion failed — HTTP', completeRes.status, 'draftId:', draftId);
-      return res.status(502).json({ error: 'Order created but could not be completed' });
+      return idemResolve(502, { error: 'Order created but could not be completed' });
     }
 
     const completeData = await completeRes.json();
@@ -278,7 +336,18 @@ if (trackResult.status === 'rejected') {
 }
 const fullOrder = fullOrderResult.status === 'fulfilled' ? fullOrderResult.value : null;
 
-return res.status(200).json({
+// ── Count this successful order against the phone cap ──
+if (!testMode) {
+  const now   = Date.now();
+  const entry = phoneOrderStore.get(cleanPhone);
+  if (!entry || now - entry.windowStart > PHONE_WINDOW) {
+    phoneOrderStore.set(cleanPhone, { count: 1, windowStart: now });
+  } else {
+    entry.count++;
+  }
+}
+
+return idemResolve(200, {
   success:      true,
   ref,
   orderId:      order.order_id,
@@ -300,6 +369,6 @@ return res.status(200).json({
 
   } catch (err) {
     console.error('Network error completing draft:', err);
-    return res.status(500).json({ error: 'Network error completing order' });
+    return idemResolve(500, { error: 'Network error completing order' });
   }
 }
