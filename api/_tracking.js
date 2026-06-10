@@ -291,7 +291,8 @@ export async function trackPurchase(data) {
   });
 }
 
-const META_ONLY = new Set(); // FindLocation now also goes to TikTok
+// Events that should never be sent to TikTok (Meta custom events with no TikTok equivalent).
+const META_ONLY = new Set(['CustomizeProduct']);
 
 export async function trackEvent(data) {
   const tasks = [], platforms = [];
