@@ -61,6 +61,7 @@ export default async function handler(req, res) {
   const {
     variantId,
     quantity       = 1,
+    items          = null,  // optional multi-item orders: [{ variantId?, title?, priceDzd?, quantity }]
     name,
     phone,
     wilaya,
@@ -88,7 +89,8 @@ export default async function handler(req, res) {
     description     = ''
   } = req.body;
 
-  if (!variantId || !name || !phone || !wilaya || !baladiya) {
+  const hasItems = Array.isArray(items) && items.length > 0;
+  if ((!variantId && !hasItems) || !name || !phone || !wilaya || !baladiya) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
@@ -121,10 +123,43 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid Algerian phone number' });
   }
 
-  const variantIdInt = parseInt(variantId);
-  if (isNaN(variantIdInt) || variantIdInt <= 0) {
-    return res.status(400).json({ error: 'Invalid variant ID' });
+  // ── Build draft line items ──────────────────────────────────────────────
+  // items[] supports landing-only products (custom title+price lines) and
+  // upsell bumps; the single top-level variantId remains for the theme.
+  const MAX_ITEMS = 5;
+  const clampQty  = q => Math.min(Math.max(parseInt(q) || 1, 1), 10);
+
+  let lineItems;
+  if (hasItems) {
+    if (items.length > MAX_ITEMS) {
+      return res.status(400).json({ error: 'Too many items' });
+    }
+    lineItems = [];
+    for (const item of items) {
+      const qty = clampQty(item?.quantity);
+      const vid = parseInt(item?.variantId);
+      if (!isNaN(vid) && vid > 0) {
+        lineItems.push({ variant_id: vid, quantity: qty });
+        continue;
+      }
+      const title = sanitize(item?.title);
+      const price = Number(item?.priceDzd);
+      if (!title || !Number.isFinite(price) || price < 0 || price > 1_000_000) {
+        return res.status(400).json({ error: 'Invalid order item' });
+      }
+      lineItems.push({ title, price: price.toFixed(2), quantity: qty });
+    }
+  } else {
+    const variantIdInt = parseInt(variantId);
+    if (isNaN(variantIdInt) || variantIdInt <= 0) {
+      return res.status(400).json({ error: 'Invalid variant ID' });
+    }
+    lineItems = [{ variant_id: variantIdInt, quantity: clampQty(quantity) }];
   }
+
+  // Tracking identifiers — first real variant in the order, total unit count
+  const variantIdInt = lineItems.find(li => li.variant_id)?.variant_id || 0;
+  const totalQty     = lineItems.reduce((n, li) => n + li.quantity, 0);
 
   // ── Idempotency: duplicate submit with the same eventId ──
   const idemKey = eventId && String(eventId).slice(0, 64);
@@ -162,7 +197,7 @@ export default async function handler(req, res) {
   // ── Shared tracking helper for mock / draft modes ──
   const fireTestTracking = (ref, total) => trackPurchase({
     ref, total, unitPrice: '0',
-    variantId: variantIdInt, quantity: Math.min(parseInt(quantity) || 1, 10),
+    variantId: variantIdInt, quantity: totalQty,
     phone: cleanPhone, name: cleanName, city: cleanBaladiya, state: cleanWilaya,
     eventId: eventId || ref, fbp, fbc, externalId, ttp, ttclid, sourceUrl,
     productTitle, contentCategory, brand, description,
@@ -197,9 +232,7 @@ export default async function handler(req, res) {
 
   const draftPayload = {
     draft_order: {
-      line_items: [
-        { variant_id: variantIdInt, quantity: Math.min(parseInt(quantity) || 1, 10) }
-      ],
+      line_items: lineItems,
       shipping_address: {
         first_name: cleanName, phone: cleanPhone,
         address1: cleanAddress, city: cleanBaladiya,
@@ -276,7 +309,7 @@ export default async function handler(req, res) {
 
    // ── Run tracking + full-order fetch concurrently — saves ~300 ms for the user ──
 // tracking uses order.total_price (same value as full order) and a computed unit price.
-const qty = Math.min(parseInt(quantity) || 1, 10);
+const qty = totalQty;
 const totalFloat = parseFloat(order.total_price || 0);
 const shippingFloat = parseFloat(shippingCost) || 0;
 const computedUnitPrice = String(((totalFloat - shippingFloat) / qty).toFixed(2));

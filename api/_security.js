@@ -52,9 +52,17 @@ export function setCorsHeaders(req, res, { anyOrigin = false } = {}) {
   if (anyOrigin) {
     res.setHeader('Access-Control-Allow-Origin', '*');
   } else {
+    // LANDING_ORIGINS: comma-separated full origins of the Next.js landing
+    // deployments (e.g. "https://landing.example.com,https://x.up.railway.app")
+    const landingOrigins = (process.env.LANDING_ORIGINS || '')
+      .split(',')
+      .map(s => s.trim().replace(/\/$/, ''))
+      .filter(Boolean);
+
     const allowedOrigins = [
       SHOP_DOMAIN    ? `https://${SHOP_DOMAIN}`    : null,
       SHOP_MYSHOPIFY ? `https://${SHOP_MYSHOPIFY}` : null,
+      ...landingOrigins,
     ].filter(Boolean);
 
     if (allowedOrigins.includes(origin)) {
