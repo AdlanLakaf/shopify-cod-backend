@@ -76,6 +76,12 @@ export function getClientIp(req) {
     || 'unknown';
 }
 
+// LOG-ONLY by default: CGNAT means one IP = thousands of real customers, so
+// blocking by IP costs sales. We still count and log would-be blocks for
+// visibility. Set RATE_LIMIT_ENFORCE=true in env to actually block (only do
+// this during an active attack).
+const RATE_LIMIT_ENFORCE = process.env.RATE_LIMIT_ENFORCE === 'true';
+
 export function checkRateLimit(req, res, { bucket = 'global', max = RATE_LIMIT_MAX } = {}) {
   const key   = bucket + ':' + getClientIp(req);
   const now   = Date.now();
@@ -86,17 +92,23 @@ export function checkRateLimit(req, res, { bucket = 'global', max = RATE_LIMIT_M
     return null;
   }
 
-  if (entry.count >= max) {
-    const retryAfter = Math.ceil((RATE_LIMIT_WINDOW - (now - entry.windowStart)) / 1000);
-    res.setHeader('Retry-After', retryAfter);
-    console.warn(`[rate-limit] 429 bucket=${bucket} ip=${getClientIp(req)} count=${entry.count}`);
-    return res.status(429).json({
-      error: `Too many requests. Try again in ${Math.ceil(retryAfter / 60)} minutes.`,
-      code:  'rate_limited'
-    });
+  entry.count++;
+
+  if (entry.count > max) {
+    // Log once per 50 excess requests so a flood doesn't drown the logs
+    if (entry.count % 50 === 1 || entry.count === max + 1) {
+      console.warn(`[rate-limit] ${RATE_LIMIT_ENFORCE ? '429' : 'would-block (log-only)'} bucket=${bucket} ip=${getClientIp(req)} count=${entry.count}`);
+    }
+    if (RATE_LIMIT_ENFORCE) {
+      const retryAfter = Math.ceil((RATE_LIMIT_WINDOW - (now - entry.windowStart)) / 1000);
+      res.setHeader('Retry-After', retryAfter);
+      return res.status(429).json({
+        error: `Too many requests. Try again in ${Math.ceil(retryAfter / 60)} minutes.`,
+        code:  'rate_limited'
+      });
+    }
   }
 
-  entry.count++;
   return null;
 }
 
