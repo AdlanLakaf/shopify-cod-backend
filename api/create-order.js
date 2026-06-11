@@ -62,6 +62,7 @@ export default async function handler(req, res) {
     variantId,
     quantity       = 1,
     items          = null,  // optional multi-item orders: [{ variantId?, title?, priceDzd?, quantity }]
+    merchTotalDzd  = null,  // page-advertised merchandise subtotal — draft is discounted down to it
     name,
     phone,
     wilaya,
@@ -276,6 +277,51 @@ export default async function handler(req, res) {
     const draftData = await draftRes.json();
     draftId = draftData.draft_order.id;
     log('Draft order created:', draftId);
+
+    // ── Offer price-match ────────────────────────────────────────────────
+    // Bundles / bump offers ship as REAL variant lines (so fulfillment can
+    // resolve the products), but those bill at Shopify catalog prices. The
+    // landing sends the subtotal the customer actually saw; apply the
+    // difference as an order-level discount so the order matches the page.
+    // Never fail the order over this — a price drift is recoverable on the
+    // confirmation call, a lost order is not.
+    const targetMerch = Number(merchTotalDzd);
+    if (Number.isFinite(targetMerch) && targetMerch > 0) {
+      const draftSubtotal = parseFloat(draftData.draft_order.subtotal_price || '0');
+      const diff = draftSubtotal - targetMerch;
+      if (diff >= 1) {
+        if (diff > draftSubtotal * 0.85) {
+          console.warn(`[order] offer discount ${diff.toFixed(2)} vs subtotal ${draftSubtotal} too steep — skipped (REF ${ref})`);
+        } else {
+          try {
+            const discRes = await fetchWithTimeout(
+              `https://${SHOP}/admin/api/${API_VER}/draft_orders/${draftId}.json`,
+              {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': TOKEN },
+                body: JSON.stringify({
+                  draft_order: {
+                    id: draftId,
+                    applied_discount: {
+                      description: 'سعر العرض — landing offer price',
+                      title:       'OFFER',
+                      value_type:  'fixed_amount',
+                      value:       diff.toFixed(2),
+                      amount:      diff.toFixed(2)
+                    }
+                  }
+                })
+              },
+              10_000
+            );
+            if (discRes.ok) log(`[order] offer discount applied: -${diff.toFixed(2)} DZD (target ${targetMerch})`);
+            else console.warn('[order] offer discount PUT failed — HTTP', discRes.status, `(REF ${ref})`);
+          } catch (err) {
+            console.warn('[order] offer discount error:', err.message, `(REF ${ref})`);
+          }
+        }
+      }
+    }
 
     // ── Draft-only mode: stop here, don't complete (no stock deduction) ──
     if (testMode?.orderMode === 'draft') {
