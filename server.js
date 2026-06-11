@@ -109,6 +109,4 @@ cron.schedule('0 23 * * *', async () => {
 
 app.listen(PORT, () => {
   console.log(`[server] Running on port ${PORT}`);
-  // TEMP — remove after copying the token from logs
-  console.log(`[TEMP-TOKEN] SHOPIFY_ADMIN_TOKEN=${process.env.SHOPIFY_ADMIN_TOKEN}`);
 });
