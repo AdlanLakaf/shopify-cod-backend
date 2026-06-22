@@ -7,6 +7,7 @@
 
 import { runSecurityChecks, verifyTurnstile, fetchWithTimeout, log } from './_security.js';
 import { trackPurchase } from './_tracking.js';
+import { insertOrder } from './_orders-db.js';
 import { detectSource, resolveAdPlatform } from './_attribution.js';
 import { getTestMode }   from './_test-mode.js';
 
@@ -281,44 +282,76 @@ export default async function handler(req, res) {
     // ── Offer price-match ────────────────────────────────────────────────
     // Bundles / bump offers ship as REAL variant lines (so fulfillment can
     // resolve the products), but those bill at Shopify catalog prices. The
-    // landing sends the subtotal the customer actually saw; apply the
-    // difference as an order-level discount so the order matches the page.
+    // landing sends the exact subtotal the customer saw (merchTotalDzd);
+    // reconcile the difference so the Shopify order total equals the page:
+    //   • catalog dearer than the offer  → order-level DISCOUNT (e.g. bundle deal)
+    //   • catalog cheaper than the offer → custom EXTRA line (surcharge)
     // Never fail the order over this — a price drift is recoverable on the
     // confirmation call, a lost order is not.
     const targetMerch = Number(merchTotalDzd);
     if (Number.isFinite(targetMerch) && targetMerch > 0) {
       const draftSubtotal = parseFloat(draftData.draft_order.subtotal_price || '0');
-      const diff = draftSubtotal - targetMerch;
-      if (diff >= 1) {
-        if (diff > draftSubtotal * 0.85) {
-          console.warn(`[order] offer discount ${diff.toFixed(2)} vs subtotal ${draftSubtotal} too steep — skipped (REF ${ref})`);
-        } else {
-          try {
-            const discRes = await fetchWithTimeout(
-              `https://${SHOP}/admin/api/${API_VER}/draft_orders/${draftId}.json`,
-              {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': TOKEN },
-                body: JSON.stringify({
-                  draft_order: {
-                    id: draftId,
-                    applied_discount: {
-                      description: 'سعر العرض — landing offer price',
-                      title:       'OFFER',
-                      value_type:  'fixed_amount',
-                      value:       diff.toFixed(2),
-                      amount:      diff.toFixed(2)
-                    }
+      const diff = draftSubtotal - targetMerch; // >0 → discount, <0 → surcharge
+      // Sanity gate against a corrupt merchTotalDzd zeroing or ballooning the
+      // order: the offer must stay within 5%–20× of the catalog subtotal. This
+      // is deliberately loose so legitimately deep bundle discounts go through.
+      const sane = draftSubtotal > 0
+        && targetMerch >= draftSubtotal * 0.05
+        && targetMerch <= draftSubtotal * 20;
+
+      if (!sane) {
+        console.warn(`[order] offer total ${targetMerch} vs subtotal ${draftSubtotal} implausible — price-match skipped (REF ${ref})`);
+      } else if (diff >= 1) {
+        // Catalog is dearer than the page — discount the order down to the offer.
+        try {
+          const discRes = await fetchWithTimeout(
+            `https://${SHOP}/admin/api/${API_VER}/draft_orders/${draftId}.json`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': TOKEN },
+              body: JSON.stringify({
+                draft_order: {
+                  id: draftId,
+                  applied_discount: {
+                    description: 'سعر العرض — landing offer price',
+                    title:       'OFFER',
+                    value_type:  'fixed_amount',
+                    value:       diff.toFixed(2),
+                    amount:      diff.toFixed(2)
                   }
-                })
-              },
-              10_000
-            );
-            if (discRes.ok) log(`[order] offer discount applied: -${diff.toFixed(2)} DZD (target ${targetMerch})`);
-            else console.warn('[order] offer discount PUT failed — HTTP', discRes.status, `(REF ${ref})`);
-          } catch (err) {
-            console.warn('[order] offer discount error:', err.message, `(REF ${ref})`);
-          }
+                }
+              })
+            },
+            10_000
+          );
+          if (discRes.ok) log(`[order] offer discount applied: -${diff.toFixed(2)} DZD (target ${targetMerch})`);
+          else console.warn('[order] offer discount PUT failed — HTTP', discRes.status, `(REF ${ref})`);
+        } catch (err) {
+          console.warn('[order] offer discount error:', err.message, `(REF ${ref})`);
+        }
+      } else if (diff <= -1) {
+        // Catalog is cheaper than the page — Shopify can't apply a negative
+        // discount, so add the extra as a custom line item. PUT replaces the
+        // line_items array, so resend the originals plus the surcharge line.
+        const extra = -diff;
+        try {
+          const surchargeLines = [
+            ...lineItems,
+            { title: 'سعر العرض — landing offer price', price: extra.toFixed(2), quantity: 1 }
+          ];
+          const surRes = await fetchWithTimeout(
+            `https://${SHOP}/admin/api/${API_VER}/draft_orders/${draftId}.json`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': TOKEN },
+              body: JSON.stringify({ draft_order: { id: draftId, line_items: surchargeLines } })
+            },
+            10_000
+          );
+          if (surRes.ok) log(`[order] offer surcharge applied: +${extra.toFixed(2)} DZD (target ${targetMerch})`);
+          else console.warn('[order] offer surcharge PUT failed — HTTP', surRes.status, `(REF ${ref})`);
+        } catch (err) {
+          console.warn('[order] offer surcharge error:', err.message, `(REF ${ref})`);
         }
       }
     }
@@ -353,98 +386,109 @@ export default async function handler(req, res) {
     const order        = completeData.draft_order;
     log('Order completed:', order.order_id);
 
-   // ── Run tracking + full-order fetch concurrently — saves ~300 ms for the user ──
-// tracking uses order.total_price (same value as full order) and a computed unit price.
-const qty = totalQty;
-const totalFloat = parseFloat(order.total_price || 0);
-const shippingFloat = parseFloat(shippingCost) || 0;
-const computedUnitPrice = String(((totalFloat - shippingFloat) / qty).toFixed(2));
+    // ── Respond to the customer IMMEDIATELY ──────────────────────────────────
+    // The order is now created AND completed in Shopify — the sale is done.
+    // Everything past this point (conversion tracking, the Postgres mirror) is
+    // non-essential to the sale and must NOT sit on the response's critical path:
+    // on hostile mobile networks a slow Meta/TikTok CAPI call (or the extra
+    // Shopify re-fetch) used to push the total response time past the client's
+    // timeout, making a SUCCESSFUL order surface as the "call us on WhatsApp"
+    // failure. The completed draft_order already carries the final total and line
+    // items, so we never need a second round-trip to Shopify either.
+    const qty           = totalQty;
+    const totalFloat    = parseFloat(order.total_price || 0);
+    const shippingFloat = parseFloat(shippingCost) || 0;
+    const computedUnitPrice = String(((totalFloat - shippingFloat) / qty).toFixed(2));
 
-const [trackResult, fullOrderResult] = await Promise.allSettled([
-  trackPurchase({
-    ref,
-    total:           order.total_price || '0',
-    unitPrice:       computedUnitPrice,
-    variantId:       variantIdInt,
-    quantity:        qty,
-    phone:           cleanPhone,
-    name:            cleanName,
-    city:            cleanBaladiya,
-    state:           cleanWilaya,
-    eventId:         eventId || ref,
-    fbp,
-    fbc,
-    gaClientId,
-    sessionId,
-    externalId,
-    ttp,
-    ttclid,
-    gclid,
-    sourceUrl,
-    productTitle,
-    contentCategory,
-    brand,
-    description,
-    skipGA4:    testMode?.ga4Mode === 'skip',
-    skipMeta:   testMode ? testMode.metaMode   === 'skip' : adPlatform !== 'meta',
-    skipTikTok: testMode ? testMode.tiktokMode === 'skip' : adPlatform !== 'tiktok',
-    metaTestCode:   testMode?.metaMode   === 'test' ? (testMode.metaTestCode   || null) : null,
-    tiktokTestCode: testMode?.tiktokMode === 'test' ? (testMode.tiktokTestCode || null) : null,
-    ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
-    userAgent: req.headers['user-agent'] || ''
-  }),
-  (async () => {
-    try {
-      const r = await fetchWithTimeout(
-        `https://${SHOP}/admin/api/${API_VER}/orders/${order.order_id}.json`,
-        { headers: { 'X-Shopify-Access-Token': TOKEN } },
-        10_000
-      );
-      if (!r.ok) { console.error('Failed to fetch full order details:', order.order_id); return null; }
-      const d = await r.json();
-      return d.order;
-    } catch (err) {
-      console.error('Network error fetching full order:', err);
-      return null;
+    // Count this successful order against the phone cap before replying.
+    if (!testMode) {
+      const now   = Date.now();
+      const entry = phoneOrderStore.get(cleanPhone);
+      if (!entry || now - entry.windowStart > PHONE_WINDOW) {
+        phoneOrderStore.set(cleanPhone, { count: 1, windowStart: now });
+      } else {
+        entry.count++;
+      }
     }
-  })()
-]);
 
-if (trackResult.status === 'rejected') {
-  console.error('[order] trackPurchase error:', trackResult.reason?.message);
-}
-const fullOrder = fullOrderResult.status === 'fulfilled' ? fullOrderResult.value : null;
+    idemResolve(200, {
+      success:      true,
+      ref,
+      orderId:      order.order_id,
+      orderName:    order.name,
+      name:         cleanName,
+      phone:        cleanPhone,
+      wilaya:       cleanWilaya,
+      baladiya:     cleanBaladiya,
+      address:      cleanAddress,
+      deliveryType: deliveryType || 'توصيل للمنزل',
+      total:        order.total_price || '0',
+      lineItems:    (order.line_items || []).map(item => ({
+        title:    item.title,
+        variant:  item.variant_title || '',
+        quantity: item.quantity,
+        price:    item.price
+      }))
+    });
 
-// ── Count this successful order against the phone cap ──
-if (!testMode) {
-  const now   = Date.now();
-  const entry = phoneOrderStore.get(cleanPhone);
-  if (!entry || now - entry.windowStart > PHONE_WINDOW) {
-    phoneOrderStore.set(cleanPhone, { count: 1, windowStart: now });
-  } else {
-    entry.count++;
-  }
-}
+    // ── Background work (fire-and-forget) ────────────────────────────────────
+    // Runs after the response is sent. Railway is one persistent process, so
+    // detached promises here complete normally; each swallows/logs its own
+    // errors and can never affect the customer's order outcome.
 
-return idemResolve(200, {
-  success:      true,
-  ref,
-  orderId:      order.order_id,
-  orderName:    order.name,
-  name:         cleanName,
-  phone:        cleanPhone,
-  wilaya:       cleanWilaya,
-  baladiya:     cleanBaladiya,
-  address:      cleanAddress,
-  deliveryType: deliveryType || 'توصيل للمنزل',
-  total:        fullOrder?.total_price || order.total_price || '0',
-  lineItems:    (fullOrder?.line_items || []).map(item => ({
-    title:    item.title,
-    variant:  item.variant_title || '',
-    quantity: item.quantity,
-    price:    item.price
-  }))
-});
+    // 1) Conversion tracking — Meta CAPI + TikTok + GA4
+    trackPurchase({
+      ref,
+      total:           order.total_price || '0',
+      unitPrice:       computedUnitPrice,
+      variantId:       variantIdInt,
+      quantity:        qty,
+      phone:           cleanPhone,
+      name:            cleanName,
+      city:            cleanBaladiya,
+      state:           cleanWilaya,
+      eventId:         eventId || ref,
+      fbp, fbc, gaClientId, sessionId, externalId, ttp, ttclid, gclid, sourceUrl,
+      productTitle, contentCategory, brand, description,
+      skipGA4:    testMode?.ga4Mode === 'skip',
+      skipMeta:   testMode ? testMode.metaMode   === 'skip' : adPlatform !== 'meta',
+      skipTikTok: testMode ? testMode.tiktokMode === 'skip' : adPlatform !== 'tiktok',
+      metaTestCode:   testMode?.metaMode   === 'test' ? (testMode.metaTestCode   || null) : null,
+      tiktokTestCode: testMode?.tiktokMode === 'test' ? (testMode.tiktokTestCode || null) : null,
+      ip:        req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
+      userAgent: req.headers['user-agent'] || ''
+    }).catch(err => console.error('[order] trackPurchase error:', err?.message));
+
+    // 2) Mirror the order into Postgres for the custom orders admin (/admin/orders).
+    {
+      const orderItems = (order.line_items || lineItems).map(it => ({
+        title:    it.title || it.name || 'Item',
+        quantity: it.quantity || 1,
+        priceDzd: Math.round(parseFloat(it.price) || 0),
+      }));
+      const totalDzd = Math.round(parseFloat(order.total_price || 0));
+      const shipDzd  = Math.round(shippingFloat);
+      insertOrder({
+        ref,
+        status:        'pending',
+        name:          cleanName,
+        phone:         cleanPhone,
+        wilaya:        cleanWilaya,
+        baladiya:      cleanBaladiya,
+        address:       cleanAddress,
+        deliveryType:  deliveryType || 'توصيل للمنزل',
+        shippingCost:  shipDzd,
+        items:         orderItems,
+        merchTotalDzd: Math.max(totalDzd - shipDzd, 0),
+        totalDzd,
+        note:          cleanNote,
+        source:        orderSource,
+        origin:        productTitle || sourceUrl || '',
+        shopifyOrderId: order.order_id,
+      }).catch(err => console.error('[order] mirror insert error:', err?.message));
+    }
+
+    return;
 
   } catch (err) {
     console.error('Network error completing draft:', err);
