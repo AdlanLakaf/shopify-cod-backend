@@ -116,3 +116,35 @@ export async function insertOrder(o) {
     return false;
   }
 }
+
+/**
+ * Record the outcome of the background Shopify push for an order that was
+ * already saved to our DB (fast path). Either stamps the Shopify order id, or
+ * flags the row so staff see the parcel never reached Shopify. Best-effort.
+ */
+export async function updateOrderShopify(ref, { shopifyOrderId = null, syncFailed = false } = {}) {
+  const p = getPool();
+  if (!p) return false;
+  try {
+    await ensureSchema(p);
+    if (syncFailed) {
+      // Append a one-time flag to the note so it surfaces in /admin/orders.
+      await p.query(
+        `UPDATE orders
+            SET note = CASE WHEN COALESCE(note,'') = '' THEN $2 ELSE note || ' | ' || $2 END,
+                updated_at = now()
+          WHERE ref = $1 AND COALESCE(note,'') NOT LIKE '%SHOPIFY-SYNC-FAILED%'`,
+        [ref, '⚠ SHOPIFY-SYNC-FAILED']
+      );
+    } else if (shopifyOrderId) {
+      await p.query(
+        'UPDATE orders SET shopify_order_id = $2, updated_at = now() WHERE ref = $1',
+        [ref, Number(shopifyOrderId)]
+      );
+    }
+    return true;
+  } catch (err) {
+    console.error('[orders-db] updateOrderShopify failed:', err.message, `(ref ${ref})`);
+    return false;
+  }
+}

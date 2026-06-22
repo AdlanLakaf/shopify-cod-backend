@@ -33,7 +33,12 @@ const rateLimitStore = new Map();
 const RATE_LIMIT_MAX    = 300;            // default per bucket+IP per window
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000;
 const TIMESTAMP_TTL     = 5 * 60 * 1000;
-const MAX_BODY_BYTES    = 5 * 1024;
+// Largest legitimate body is a create-order POST: up to 5 line items + 5 display
+// items + ~20 tracking fields + a full Arabic address/note (multi-byte UTF-8).
+// That lands around ~4–5 KB, so the old 5 KB cap could clip a fat real order.
+// 16 KB gives ~3× headroom for any genuine order while still rejecting the
+// oversized payloads a flood/DoS would send.
+const MAX_BODY_BYTES    = 16 * 1024;
 
 // Purge expired entries every 10 minutes — prevents unbounded memory growth
 setInterval(() => {

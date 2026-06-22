@@ -71,6 +71,10 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Unsupported event' });
   }
 
+  // Bound the client-supplied value before it reaches CAPI — a tampered beacon
+  // must not be able to train ad delivery on a junk (huge / negative) amount.
+  const safeValue = Math.min(Math.max(Number(value) || 0, 0), 2_000_000);
+
   // ── Apply test mode overrides ──
   const testMode   = getTestMode(req.body || {});
   const adPlatform = resolveAdPlatform(trafficSource);
@@ -97,7 +101,7 @@ export default async function handler(req, res) {
   await trackEvent({
     eventName:       event,
     eventId:         eventId || undefined,
-    value,
+    value:           safeValue,
     variantId,
     quantity,
     productTitle,
