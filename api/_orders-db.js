@@ -62,11 +62,15 @@ async function ensureSchema(p) {
       note             TEXT,
       source           TEXT,
       origin           TEXT,
+      origin_url       TEXT,
+      entry_url        TEXT,
       shopify_order_id BIGINT
     );
     CREATE INDEX IF NOT EXISTS orders_status_idx     ON orders (status);
     CREATE INDEX IF NOT EXISTS orders_created_at_idx ON orders (created_at DESC);
     CREATE INDEX IF NOT EXISTS orders_phone_idx      ON orders (phone);
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS origin_url TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS entry_url  TEXT;
   `).catch(err => {
     console.error('[orders-db] schema init failed:', err.message);
     schemaReady = null;          // allow a retry on the next call
@@ -88,8 +92,9 @@ export async function insertOrder(o) {
     await p.query(
       `INSERT INTO orders
          (ref, status, name, phone, wilaya, baladiya, address, delivery_type,
-          shipping_cost, items, merch_total_dzd, total_dzd, note, source, origin, shopify_order_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16)
+          shipping_cost, items, merch_total_dzd, total_dzd, note, source, origin,
+          origin_url, entry_url, shopify_order_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16,$17,$18)
        ON CONFLICT (ref) DO NOTHING`,
       [
         o.ref,
@@ -107,6 +112,8 @@ export async function insertOrder(o) {
         o.note || '',
         o.source || '',
         o.origin || '',
+        (o.originUrl || '').slice(0, 1000),
+        (o.entryUrl  || '').slice(0, 1000),
         o.shopifyOrderId ? Number(o.shopifyOrderId) : null,
       ]
     );

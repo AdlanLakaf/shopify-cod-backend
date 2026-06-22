@@ -174,6 +174,7 @@ export default async function handler(req, res) {
     ttclid          = '',
     gclid           = '',
     sourceUrl       = '',
+    entryUrl        = '',
     referrer        = '',
     trafficSource   = '',
     productTitle    = '',
@@ -200,6 +201,10 @@ export default async function handler(req, res) {
   const cleanBaladiya = sanitize(baladiya);
   const cleanAddress  = sanitize(address);
   const cleanNote = sanitize(extraNote).replace(/[\n\r]/g, ' ');
+
+  // Name-test detection: if any word in the customer name is exactly "test" (case-insensitive),
+  // treat as a QA order — insert into custom DB, create Shopify DRAFT only (no complete), skip tracking.
+  const isNameTest = cleanName.trim().split(/\s+/).some(w => w.toLowerCase() === 'test');
 
   const orderSource = detectSource({
     trafficSource,
@@ -347,7 +352,7 @@ export default async function handler(req, res) {
         price: (validShipping ?? 0).toFixed(2),
         code:  deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'
       },
-      tags: `COD, ${cleanWilaya}, ${deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'}, REF-${ref}, src-${orderSource}${testMode ? ', TEST, DO-NOT-FULFILL' : ''}`,
+      tags: `COD, ${cleanWilaya}, ${deliveryType === 'استلام من المكتب' ? 'office-pickup' : 'home-delivery'}, REF-${ref}, src-${orderSource}${testMode ? ', TEST, DO-NOT-FULFILL' : ''}${isNameTest ? ', TEST-NAME, DO-NOT-FULFILL' : ''}`,
       send_receipt: false,
       send_fulfillment_receipt: false,
       use_customer_default_address: false
@@ -363,6 +368,7 @@ export default async function handler(req, res) {
   // behaviour is unchanged until DATABASE_URL is configured. Test modes skip this.
   const fastItems = Array.isArray(req.body.displayItems) ? req.body.displayItems : null;
   if (!testMode && fastItems && fastItems.length) {
+    // isNameTest orders still use the fast path but skip tracking + skip completing the Shopify draft.
     // Validate every line price — REJECT (don't clamp) a hostile value so a
     // tampered client can neither under- nor over-report what we persist and
     // send to the ad pixels. price 0 is allowed (free gift / sample lines).
@@ -389,6 +395,11 @@ export default async function handler(req, res) {
     const merchDzd = displayItems.reduce((s, i) => s + i.priceDzd * i.quantity, 0);
     const totalDzd = Math.min(merchDzd + shipDzd, MAX_ORDER_TOTAL_DZD);
 
+    // Derive the landing slug from the URL path (/p/<slug>) — more reliable
+    // than productTitle which is a display string that can change.
+    const slugMatch = sourceUrl.match(/\/p\/([^/?#]+)/);
+    const origin    = slugMatch ? slugMatch[1] : (productTitle || sourceUrl || '');
+
     const savedToDb = await insertOrder({
       ref, status: 'pending',
       name: cleanName, phone: cleanPhone,
@@ -396,8 +407,11 @@ export default async function handler(req, res) {
       deliveryType: deliveryType || 'توصيل للمنزل',
       shippingCost: shipDzd, items: displayItems,
       merchTotalDzd: merchDzd, totalDzd,
-      note: cleanNote, source: orderSource,
-      origin: productTitle || sourceUrl || '',
+      note: (isNameTest ? '[TEST-NAME] ' : '') + cleanNote,
+      source: orderSource,
+      origin,
+      originUrl: sourceUrl || '',
+      entryUrl:  entryUrl  || '',
     });
 
     if (savedToDb) {
@@ -417,25 +431,37 @@ export default async function handler(req, res) {
       });
 
       // ── Background (fire-and-forget) — never affects the customer's outcome ──
-      // 1) Conversion tracking, using our own computed total (no Shopify needed).
-      const unitPrice = String((merchDzd / Math.max(totalQty, 1)).toFixed(2));
-      trackPurchase({
-        ref, total: totalDzd.toFixed(2), unitPrice,
-        variantId: variantIdInt, quantity: totalQty,
-        phone: cleanPhone, name: cleanName, city: cleanBaladiya, state: cleanWilaya,
-        eventId: eventId || ref,
-        fbp, fbc, gaClientId, sessionId, externalId, ttp, ttclid, gclid, sourceUrl,
-        productTitle, contentCategory, brand, description,
-        skipGA4: false, skipMeta: adPlatform !== 'meta', skipTikTok: adPlatform !== 'tiktok',
-        ip: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
-        userAgent: req.headers['user-agent'] || ''
-      }).catch(err => console.error('[order] trackPurchase error:', err?.message));
+      if (isNameTest) {
+        // Name-based test order: create Shopify DRAFT only (no complete), skip all tracking.
+        log(`[order] name-test order ${ref} — draft only, no tracking`);
+        fetchWithTimeout(
+          `https://${SHOP}/admin/api/${API_VER}/draft_orders.json`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': TOKEN }, body: JSON.stringify(draftPayload) },
+          15_000
+        ).then(r => r.json())
+         .then(d => { log('[order] name-test Shopify draft created:', d.draft_order?.id); })
+         .catch(err => console.error('[order] name-test Shopify draft failed:', err?.message, `(REF ${ref})`));
+      } else {
+        // 1) Conversion tracking, using our own computed total (no Shopify needed).
+        const unitPrice = String((merchDzd / Math.max(totalQty, 1)).toFixed(2));
+        trackPurchase({
+          ref, total: totalDzd.toFixed(2), unitPrice,
+          variantId: variantIdInt, quantity: totalQty,
+          phone: cleanPhone, name: cleanName, city: cleanBaladiya, state: cleanWilaya,
+          eventId: eventId || ref,
+          fbp, fbc, gaClientId, sessionId, externalId, ttp, ttclid, gclid, sourceUrl,
+          productTitle, contentCategory, brand, description,
+          skipGA4: false, skipMeta: adPlatform !== 'meta', skipTikTok: adPlatform !== 'tiktok',
+          ip: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '',
+          userAgent: req.headers['user-agent'] || ''
+        }).catch(err => console.error('[order] trackPurchase error:', err?.message));
 
-      // 2) Create the real Shopify order, then stamp its id on our row (or flag
-      //    the row if Shopify never accepted it — the sale is safe either way).
-      pushOrderToShopify({ SHOP, TOKEN, API_VER, draftPayload, lineItems, merchTotalDzd, ref })
-        .then(order => { log('[order] background Shopify order:', order.order_id); return updateOrderShopify(ref, { shopifyOrderId: order.order_id }); })
-        .catch(err => { console.error('[order] background Shopify failed:', err?.message, `(REF ${ref})`); return updateOrderShopify(ref, { syncFailed: true }); });
+        // 2) Create the real Shopify order, then stamp its id on our row (or flag
+        //    the row if Shopify never accepted it — the sale is safe either way).
+        pushOrderToShopify({ SHOP, TOKEN, API_VER, draftPayload, lineItems, merchTotalDzd, ref })
+          .then(order => { log('[order] background Shopify order:', order.order_id); return updateOrderShopify(ref, { shopifyOrderId: order.order_id }); })
+          .catch(err => { console.error('[order] background Shopify failed:', err?.message, `(REF ${ref})`); return updateOrderShopify(ref, { syncFailed: true }); });
+      }
 
       return;
     }
@@ -543,11 +569,12 @@ export default async function handler(req, res) {
     }
 
     // ── Draft-only mode: stop here, don't complete (no stock deduction) ──
-    if (testMode?.orderMode === 'draft') {
-      log(`[test] draft-only order: ${draftId}`);
+    if (testMode?.orderMode === 'draft' || isNameTest) {
+      log(`[${isNameTest ? 'name-test' : 'test'}] draft-only order: ${draftId}`);
       const draftTotal = String(draftData.draft_order?.total_price || shippingCost || 0);
-      await fireTestTracking(ref, draftTotal);
-      return idemResolve(200, { success: true, ref, orderId: 0, orderName: ref, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: draftTotal, lineItems: [], _test: true });
+      if (testMode?.orderMode === 'draft') await fireTestTracking(ref, draftTotal);
+      // name-test: no tracking at all
+      return idemResolve(200, { success: true, ref, orderId: 0, orderName: ref, name: cleanName, phone: cleanPhone, wilaya: cleanWilaya, baladiya: cleanBaladiya, address: cleanAddress, deliveryType: deliveryType || 'توصيل للمنزل', total: draftTotal, lineItems: [], _test: !!testMode, _nameTest: isNameTest });
     }
   } catch (err) {
     console.error('Network error creating draft:', err);
