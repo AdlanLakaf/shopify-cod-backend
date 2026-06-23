@@ -23,6 +23,21 @@ function toE164DZ(phone) {
   return digits;
 }
 
+// Meta flags a "modified fbclid" (lowercased / truncated / %-encoded) in the
+// fbc parameter and drops Event Match Quality. The cookie should already be a
+// raw `fb.1.<ts>.<fbclid>`, but a small slice of ad clicks arrive via redirects
+// that URL-encode the fbclid, so the stored fbc still carries `%3D` padding.
+// Validate the shape and undo only that stray percent-encoding — NEVER change
+// case or length. A value that doesn't parse is dropped rather than sent
+// (Meta still matches on IP + UA + the hashed identifiers).
+function cleanFbc(fbc) {
+  const m = /^fb\.1\.(\d{6,})\.(.+)$/.exec(String(fbc || '').trim());
+  if (!m) return '';
+  let id = m[2];
+  if (/%[0-9A-Fa-f]{2}/.test(id)) { try { id = decodeURIComponent(id); } catch { /* keep raw */ } }
+  return `fb.1.${m[1]}.${id}`;
+}
+
 // ── Identity builders ─────────────────────────────────────────────────────────
 
 function buildMetaUserData({ phone, name, city, state, fbp, fbc, externalId, ip, userAgent }) {
@@ -42,7 +57,8 @@ function buildMetaUserData({ phone, name, city, state, fbp, fbc, externalId, ip,
   if (city)  userData.ct  = [sha256(city)];
   if (state) userData.st  = [sha256(state)];
   if (fbp)   userData.fbp = fbp;
-  if (fbc)   userData.fbc = fbc;
+  const fbcClean = cleanFbc(fbc);
+  if (fbcClean) userData.fbc = fbcClean;
   return userData;
 }
 
