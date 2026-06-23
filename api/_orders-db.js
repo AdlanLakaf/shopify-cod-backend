@@ -89,7 +89,7 @@ export async function insertOrder(o) {
   if (!p) return false;
   try {
     await ensureSchema(p);
-    await p.query(
+    const result = await p.query(
       `INSERT INTO orders
          (ref, status, name, phone, wilaya, baladiya, address, delivery_type,
           shipping_cost, items, merch_total_dzd, total_dzd, note, source, origin,
@@ -117,6 +117,17 @@ export async function insertOrder(o) {
         o.shopifyOrderId ? Number(o.shopifyOrderId) : null,
       ]
     );
+
+    // Notify the landing app's SSE clients about the new order.
+    // rowCount === 0 means ON CONFLICT DO NOTHING fired (idempotent replay) — no notify.
+    // Fire-and-forget: never awaited, never allowed to throw into the order path.
+    if (result.rowCount > 0) {
+      p.query(
+        `SELECT pg_notify('hn_order_events', $1)`,
+        [JSON.stringify({ type: 'created', ref: o.ref })]
+      ).catch(err => console.error('[orders-db] pg_notify failed:', err.message));
+    }
+
     return true;
   } catch (err) {
     console.error('[orders-db] insertOrder failed:', err.message, `(ref ${o?.ref})`);
