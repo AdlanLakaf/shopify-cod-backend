@@ -202,7 +202,9 @@ export async function upsertLead(input = {}) {
     // ── INSERT (new lead) — requires a valid phone (the identifying signal) ──
     if (!row) {
       if (!phone) { await client.query('ROLLBACK'); return false; }
-      const status = (stage === 'new') ? 'enriched' : resolveStatus('new', stage);
+      // Fresh lead: the stage maps straight to its natural status ('new' stays
+      // 'new'; an enrich/submit/fail first-beacon takes that status directly).
+      const status = resolveStatus('new', stage);
       const history = [{ ts: new Date().toISOString(), field: '_', action: 'create', note: 'lead captured' }];
       await client.query(
         `INSERT INTO leads

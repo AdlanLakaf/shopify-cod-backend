@@ -14,8 +14,10 @@ import trackEventHandler       from './api/track-event.js';
 import countHubsHandler        from './api/count-hubs.js';
 import logErrorHandler         from './api/log-error.js';
 import leadHandler             from './api/lead.js';
+import funnelHandler           from './api/funnel.js';
 import { syncPageData }        from './api/sync-page-data.js';
 import { pruneLeads }          from './api/_leads-db.js';
+import { pruneSessions }       from './api/_funnel-db.js';
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -69,6 +71,7 @@ app.all('/api/track-event',        trackEventHandler);
 app.all('/api/count-hubs',         countHubsHandler);
 app.all('/api/log-error',          logErrorHandler);
 app.all('/api/lead',               leadHandler);
+app.all('/api/funnel',             funnelHandler);
 
 // ── Manual sync trigger (protected with ADMIN_SECRET bearer token) ────────────
 app.post('/api/admin/sync-page-data', async (req, res) => {
@@ -105,6 +108,12 @@ cron.schedule('0 23 * * *', async () => {
     if (removed) console.log(`[cron] Pruned ${removed} stale lead(s)`);
   } catch (err) {
     console.error('[cron] Lead prune failed:', err.message);
+  }
+  try {
+    const removed = await pruneSessions(30);
+    if (removed) console.log(`[cron] Pruned ${removed} stale session(s)`);
+  } catch (err) {
+    console.error('[cron] Session prune failed:', err.message);
   }
 }, { timezone: 'UTC' });
 

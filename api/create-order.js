@@ -9,6 +9,7 @@ import { runSecurityChecks, verifyTurnstile, fetchWithTimeout, log } from './_se
 import { trackPurchase } from './_tracking.js';
 import { insertOrder, updateOrderShopify } from './_orders-db.js';
 import { markLeadConverted } from './_leads-db.js';
+import { markSessionConverted } from './_funnel-db.js';
 import { detectSource, resolveAdPlatform } from './_attribution.js';
 import { getTestMode }   from './_test-mode.js';
 
@@ -196,7 +197,8 @@ export default async function handler(req, res) {
     contentCategory = '',
     brand           = '',
     description     = '',
-    leadId          = ''
+    leadId          = '',
+    funnelSessionId = ''
   } = req.body;
 
   const hasItems = Array.isArray(items) && items.length > 0;
@@ -436,6 +438,8 @@ export default async function handler(req, res) {
       // a missing lead (organic/direct submit) is fine, never blocks the order.
       markLeadConverted({ leadId, orderRef: ref, phone: cleanPhone })
         .catch(err => console.error('[order] lead convert error:', err?.message));
+      markSessionConverted({ sessionId: funnelSessionId, leadId, phone: cleanPhone })
+        .catch(err => console.error('[order] session convert error:', err?.message));
 
       // Count this order against the per-phone cap before replying.
       const now = Date.now();
@@ -725,6 +729,8 @@ export default async function handler(req, res) {
       // Link & convert the matching lead (funnel close) — fallback Shopify path.
       markLeadConverted({ leadId, orderRef: ref, shopifyOrderId: order.order_id, phone: cleanPhone })
         .catch(err => console.error('[order] lead convert error:', err?.message));
+      markSessionConverted({ sessionId: funnelSessionId, leadId, phone: cleanPhone })
+        .catch(err => console.error('[order] session convert error:', err?.message));
     }
 
     return;
