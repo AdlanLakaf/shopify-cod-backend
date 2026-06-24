@@ -8,6 +8,7 @@
 import { runSecurityChecks, verifyTurnstile, fetchWithTimeout, log } from './_security.js';
 import { trackPurchase } from './_tracking.js';
 import { insertOrder, updateOrderShopify } from './_orders-db.js';
+import { markLeadConverted } from './_leads-db.js';
 import { detectSource, resolveAdPlatform } from './_attribution.js';
 import { getTestMode }   from './_test-mode.js';
 
@@ -42,6 +43,20 @@ function cleanMoney(v, max) {
   const n = Math.round(Number(v));
   if (!Number.isFinite(n) || n < 0 || n > max) return null;
   return n;
+}
+
+// Order-line thumbnail URL. Client-supplied (the landing sends the product's
+// CDN image), so accept ONLY https Shopify CDN hosts — it ends up in an admin
+// <img src> and must never become an arbitrary external/tracking URL. Anything
+// else is dropped (the admin falls back to initials). Returns '' when invalid.
+function cleanImageUrl(v) {
+  if (typeof v !== 'string' || v.length > 1000) return '';
+  try {
+    const u = new URL(v.trim());
+    if (u.protocol !== 'https:') return '';
+    if (!/(^|\.)(cdn\.shopify\.com|shopifycdn\.com|myshopify\.com)$/.test(u.hostname)) return '';
+    return u.toString();
+  } catch { return ''; }
 }
 
 // ── Per-phone order cap — the only spam guard a real buyer can never hit ─────
@@ -180,7 +195,8 @@ export default async function handler(req, res) {
     productTitle    = '',
     contentCategory = '',
     brand           = '',
-    description     = ''
+    description     = '',
+    leadId          = ''
   } = req.body;
 
   const hasItems = Array.isArray(items) && items.length > 0;
@@ -382,6 +398,7 @@ export default async function handler(req, res) {
         title:    sanitize(it?.title) || productTitle || 'Order',
         quantity: clampQty(it?.quantity),
         priceDzd,
+        imageUrl: cleanImageUrl(it?.imageUrl),
       });
     }
 
@@ -415,6 +432,11 @@ export default async function handler(req, res) {
     });
 
     if (savedToDb) {
+      // Link & convert the matching lead (funnel close). Fire-and-forget —
+      // a missing lead (organic/direct submit) is fine, never blocks the order.
+      markLeadConverted({ leadId, orderRef: ref, phone: cleanPhone })
+        .catch(err => console.error('[order] lead convert error:', err?.message));
+
       // Count this order against the per-phone cap before replying.
       const now = Date.now();
       const entry = phoneOrderStore.get(cleanPhone);
@@ -699,6 +721,10 @@ export default async function handler(req, res) {
         origin:        productTitle || sourceUrl || '',
         shopifyOrderId: order.order_id,
       }).catch(err => console.error('[order] mirror insert error:', err?.message));
+
+      // Link & convert the matching lead (funnel close) — fallback Shopify path.
+      markLeadConverted({ leadId, orderRef: ref, shopifyOrderId: order.order_id, phone: cleanPhone })
+        .catch(err => console.error('[order] lead convert error:', err?.message));
     }
 
     return;

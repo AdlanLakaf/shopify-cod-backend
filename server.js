@@ -13,7 +13,9 @@ import getStopdesksHandler     from './api/get-stopdesks.js';
 import trackEventHandler       from './api/track-event.js';
 import countHubsHandler        from './api/count-hubs.js';
 import logErrorHandler         from './api/log-error.js';
+import leadHandler             from './api/lead.js';
 import { syncPageData }        from './api/sync-page-data.js';
+import { pruneLeads }          from './api/_leads-db.js';
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -66,6 +68,7 @@ app.all('/api/get-stopdesks',      getStopdesksHandler);
 app.all('/api/track-event',        trackEventHandler);
 app.all('/api/count-hubs',         countHubsHandler);
 app.all('/api/log-error',          logErrorHandler);
+app.all('/api/lead',               leadHandler);
 
 // ── Manual sync trigger (protected with ADMIN_SECRET bearer token) ────────────
 app.post('/api/admin/sync-page-data', async (req, res) => {
@@ -93,6 +96,15 @@ cron.schedule('0 23 * * *', async () => {
     console.log('[cron] Daily page-data sync completed successfully');
   } catch (err) {
     console.error('[cron] Daily page-data sync failed:', err.message);
+  }
+
+  // Retention prune — drop leads older than 30 days so the table stays small
+  // and the abandoned-callback queue stays fresh. Best-effort; no-op without a DB.
+  try {
+    const removed = await pruneLeads(30);
+    if (removed) console.log(`[cron] Pruned ${removed} stale lead(s)`);
+  } catch (err) {
+    console.error('[cron] Lead prune failed:', err.message);
   }
 }, { timezone: 'UTC' });
 
