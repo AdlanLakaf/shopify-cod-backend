@@ -442,6 +442,7 @@ export default async function handler(req, res) {
         deliveryType: deliveryType || 'توصيل للمنزل',
         merchTotalDzd: merchDzd, shippingCost: shipDzd, totalDzd,
         source: orderSource, origin, originUrl: sourceUrl || '',
+        imageUrl: displayItems[0]?.imageUrl || '',
       }).catch(err => console.error('[order] lead convert error:', err?.message));
       markSessionConverted({ sessionId: funnelSessionId, leadId, phone: cleanPhone })
         .catch(err => console.error('[order] session convert error:', err?.message));

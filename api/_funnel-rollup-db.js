@@ -28,10 +28,17 @@ import { FUNNEL_STEPS } from './_funnel-db.js';
 let pool = null;
 let schemaReady = null;
 
-/** Configured rollup window in hours. Clamped to a sane divisor-ish range. */
+// Only divisors of 24 are allowed: buckets are epoch-aligned to N-hour steps,
+// and a divisor of 24 guarantees every boundary lands on a wall-clock hour and
+// resets cleanly at UTC midnight — so the windows are 00:00, 0N:00, … never an
+// offset like 33-past-the-hour that drifts relative to when the server booted.
+const ALLOWED_ROLLUP_HOURS = [1, 2, 3, 4, 6, 8, 12, 24];
+
+/** Configured rollup window in hours, snapped to the nearest 24-divisor. */
 export function rollupHours() {
-  const n = Math.floor(Number(process.env.FUNNEL_ROLLUP_HOURS) || 1);
-  return Math.min(24, Math.max(1, n));
+  const raw = Math.floor(Number(process.env.FUNNEL_ROLLUP_HOURS) || 1);
+  if (ALLOWED_ROLLUP_HOURS.includes(raw)) return raw;
+  return ALLOWED_ROLLUP_HOURS.reduce((best, v) => (Math.abs(v - raw) < Math.abs(best - raw) ? v : best), 1);
 }
 
 function getPool() {

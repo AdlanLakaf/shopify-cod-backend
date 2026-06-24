@@ -52,6 +52,7 @@ export default async function handler(req, res) {
     deliveryType:  body.deliveryType,
     variantId:     body.variantId,
     variantTitle:  body.variantTitle,
+    imageUrl:      body.imageUrl || body.image,
     quantity:      body.quantity,
     merchTotalDzd: body.merchTotalDzd,
     shippingCost:  body.shippingCost,
