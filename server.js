@@ -24,7 +24,12 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '5kb' }));
+// Parse JSON bodies. We ALSO parse `text/plain` as JSON: cross-origin
+// `navigator.sendBeacon` may only use CORS-safelisted content-types, so the
+// lead / funnel / log-error beacons send their JSON as text/plain to avoid a
+// preflight that sendBeacon cannot perform. type-is matches the Blob's
+// `text/plain;charset=UTF-8` against 'text/plain'.
+app.use(express.json({ limit: '5kb', type: ['application/json', 'text/plain'] }));
 
 // ── Root status page ──────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
