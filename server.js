@@ -18,6 +18,7 @@ import funnelHandler           from './api/funnel.js';
 import { syncPageData }        from './api/sync-page-data.js';
 import { pruneLeads }          from './api/_leads-db.js';
 import { pruneSessions }       from './api/_funnel-db.js';
+import { rollupClosedBuckets, pruneRollups, rollupHours } from './api/_funnel-rollup-db.js';
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -114,6 +115,26 @@ cron.schedule('0 23 * * *', async () => {
     if (removed) console.log(`[cron] Pruned ${removed} stale session(s)`);
   } catch (err) {
     console.error('[cron] Session prune failed:', err.message);
+  }
+  try {
+    const removed = await pruneRollups(30);
+    if (removed) console.log(`[cron] Pruned ${removed} stale funnel rollup(s)`);
+  } catch (err) {
+    console.error('[cron] Rollup prune failed:', err.message);
+  }
+}, { timezone: 'UTC' });
+
+// ── Hourly cron — summarise closed funnel windows ────────────────────────────
+// Folds every fully-elapsed N-hour window of raw `sessions` into compact
+// `funnel_rollups` rows and drops the raw rows. Raw sessions are thus kept only
+// for the current open window (the live events the admin shows in real time).
+// N = FUNNEL_ROLLUP_HOURS (default 1). Best-effort; no-op without a DB.
+cron.schedule('5 * * * *', async () => {
+  try {
+    const folded = await rollupClosedBuckets();
+    if (folded) console.log(`[cron] Funnel rollup folded ${folded} session(s) (window ${rollupHours()}h)`);
+  } catch (err) {
+    console.error('[cron] Funnel rollup failed:', err.message);
   }
 }, { timezone: 'UTC' });
 

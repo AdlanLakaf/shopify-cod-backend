@@ -80,12 +80,19 @@ async function ensureSchema(p) {
       user_agent        TEXT,
       order_ref         TEXT,
       shopify_order_id  BIGINT,
+      order_count       INTEGER NOT NULL DEFAULT 0,
+      last_source       TEXT,
+      last_origin       TEXT,
       fail_reason       TEXT,
       history           JSONB NOT NULL DEFAULT '[]'::jsonb
     );
     CREATE INDEX IF NOT EXISTS leads_status_idx     ON leads (status);
     CREATE INDEX IF NOT EXISTS leads_phone_idx      ON leads (phone);
     CREATE INDEX IF NOT EXISTS leads_created_at_idx ON leads (created_at DESC);
+    -- Additive columns for already-created tables (multi-order + last-touch attribution).
+    ALTER TABLE leads ADD COLUMN IF NOT EXISTS order_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_source TEXT;
+    ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_origin TEXT;
   `).catch(err => {
     console.error('[leads-db] schema init failed:', err.message);
     schemaReady = null;          // allow a retry on the next call
@@ -199,9 +206,12 @@ export async function upsertLead(input = {}) {
       merged = !!row;
     }
 
-    // ── INSERT (new lead) — requires a valid phone (the identifying signal) ──
+    // ── INSERT (new lead) — requires BOTH a real name and a valid phone ──
+    // A lead is only a lead once the customer is identifiable: name + phone
+    // both present and the phone passing the DZ mobile format. Anything less
+    // stays an anonymous funnel session (see _funnel-db.js), not a lead.
     if (!row) {
-      if (!phone) { await client.query('ROLLBACK'); return false; }
+      if (!phone || incoming.name.length < 2) { await client.query('ROLLBACK'); return false; }
       // Fresh lead: the stage maps straight to its natural status ('new' stays
       // 'new'; an enrich/submit/fail first-beacon takes that status directly).
       const status = resolveStatus('new', stage);
@@ -211,11 +221,11 @@ export async function upsertLead(input = {}) {
            (lead_id, status, identified_at, submit_clicked_at, converted_at,
             name, phone, wilaya, baladiya, office, delivery_type,
             variant_id, variant_title, quantity, merch_total_dzd, shipping_cost, total_dzd,
-            source, origin, origin_url, entry_url, referrer, user_agent, fail_reason, history)
+            source, origin, last_source, last_origin, origin_url, entry_url, referrer, user_agent, fail_reason, history)
          VALUES ($1,$2, now(), $3, $4,
             $5,$6,$7,$8,$9,$10,
             $11,$12,$13,$14,$15,$16,
-            $17,$18,$19,$20,$21,$22,$23,$24::jsonb)`,
+            $17,$18,$17,$18,$19,$20,$21,$22,$23,$24::jsonb)`,
         [
           leadId, status,
           stage === 'submitting' ? new Date() : null,
@@ -269,6 +279,17 @@ export async function upsertLead(input = {}) {
     merge.user_agent      = keepOrSet('user_agent',      incoming.user_agent);
     merge.fail_reason     = incoming.fail_reason || row.fail_reason;
 
+    // Last-touch attribution: first-touch source/origin are preserved above
+    // (keepOrSet keeps the old value); these record the MOST RECENT touch so we
+    // can see when a buyer returns via a different — or the same — ad platform.
+    merge.last_source = incoming.source || row.last_source || row.source;
+    merge.last_origin = incoming.origin || row.last_origin || row.origin;
+    const firstSrc = row.source || '';
+    if (incoming.source && firstSrc && incoming.source !== firstSrc && incoming.source !== (row.last_source || '')) {
+      entries.push({ ts: nowIso, field: 'last_source', action: 'retouch',
+                     note: `returning from "${incoming.source}" (first touch was "${firstSrc}")` });
+    }
+
     if (merged) {
       entries.push({ ts: nowIso, field: '_', action: 'merge', note: 'returning visit merged into this lead' });
     }
@@ -286,7 +307,7 @@ export async function upsertLead(input = {}) {
          variant_id = $11, variant_title = $12, quantity = $13,
          merch_total_dzd = $14, shipping_cost = $15, total_dzd = $16,
          source = $17, origin = $18, origin_url = $19, entry_url = $20, referrer = $21, user_agent = $22,
-         fail_reason = $23, history = $24::jsonb
+         fail_reason = $23, history = $24::jsonb, last_source = $25, last_origin = $26
        WHERE lead_id = $1`,
       [
         row.lead_id, status, wasUpdated, stage,
@@ -294,7 +315,7 @@ export async function upsertLead(input = {}) {
         merge.variant_id, merge.variant_title, merge.quantity,
         merge.merch_total_dzd, merge.shipping_cost, merge.total_dzd,
         merge.source, merge.origin, merge.origin_url, merge.entry_url, merge.referrer, merge.user_agent,
-        merge.fail_reason, JSON.stringify(history),
+        merge.fail_reason, JSON.stringify(history), merge.last_source, merge.last_origin,
       ]
     );
     await client.query('COMMIT');
@@ -310,12 +331,18 @@ export async function upsertLead(input = {}) {
 }
 
 /**
- * Mark a lead as converted once its order is created. Links by leadId when the
- * client passed one, otherwise falls back to the most recent open lead for the
- * phone. Idempotent and best-effort — a missing lead is fine (organic / direct
- * submits may never have beaconed). Returns true on write.
+ * Mark a lead as converted once its order is created. Links by leadId, else by
+ * the most recent open lead for the phone. If NEITHER exists — e.g. the
+ * pre-conversion beacons never reached us (blocked / network) — we INSERT a
+ * fresh converted lead from the order data, so the leads table is always a
+ * superset of orders (never "empty" after a real sale). Best-effort.
  */
-export async function markLeadConverted({ leadId = '', orderRef = '', shopifyOrderId = null, phone = '' } = {}) {
+export async function markLeadConverted({
+  leadId = '', orderRef = '', shopifyOrderId = null, phone = '',
+  name = '', wilaya = '', baladiya = '', deliveryType = '',
+  merchTotalDzd = null, shippingCost = null, totalDzd = null,
+  source = '', origin = '', originUrl = '',
+} = {}) {
   const p = getPool();
   if (!p) return false;
   const id = clean(leadId, 80);
@@ -323,13 +350,21 @@ export async function markLeadConverted({ leadId = '', orderRef = '', shopifyOrd
   if (!id && !ph) return false;
   try {
     await ensureSchema(p);
-    const entry = JSON.stringify([{ ts: new Date().toISOString(), field: '_', action: 'convert', note: `order created (${clean(orderRef, 40)})` }]);
+    const entry = JSON.stringify([{ ts: new Date().toISOString(), field: '_', action: 'convert', note: `order placed (${clean(orderRef, 40)})` }]);
+    // order_count + the history note only advance for a GENUINELY NEW order
+    // (a new order_ref, or the first conversion) — so an idempotent retry /
+    // fallback re-call of the SAME order never double-counts, while a real
+    // repeat purchase on the same lead bumps the count and logs a line.
+    const isNewOrder = `(($2 <> '' AND order_ref IS DISTINCT FROM $2) OR ($2 = '' AND order_count = 0))`;
     const sets = `status = 'converted',
                   converted_at = COALESCE(converted_at, now()),
                   updated_at   = now(),
+                  order_count  = order_count + CASE WHEN ${isNewOrder} THEN 1 ELSE 0 END,
                   order_ref    = COALESCE(NULLIF($2,''), order_ref),
                   shopify_order_id = COALESCE($3, shopify_order_id),
-                  history = (COALESCE(history,'[]'::jsonb) || $4::jsonb)`;
+                  history = CASE WHEN ${isNewOrder}
+                                 THEN COALESCE(history,'[]'::jsonb) || $4::jsonb
+                                 ELSE COALESCE(history,'[]'::jsonb) END`;
     let res;
     if (id) {
       res = await p.query(
@@ -349,7 +384,33 @@ export async function markLeadConverted({ leadId = '', orderRef = '', shopifyOrd
         [ph, clean(orderRef, 40), shopifyOrderId ? Number(shopifyOrderId) : null, entry]
       );
     }
-    return !!(res && res.rowCount > 0);
+    if (res && res.rowCount > 0) return true;
+
+    // ── Backfill: no prior lead existed → create the converted lead now. ──
+    if (!ph) return false;                              // need a valid phone to be a real lead
+    const newId = id || `conv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const history = JSON.stringify([
+      { ts: new Date().toISOString(), field: '_', action: 'create', note: 'lead created at order (no prior beacon)' },
+      { ts: new Date().toISOString(), field: '_', action: 'convert', note: `order created (${clean(orderRef, 40)})` },
+    ]);
+    const ins = await p.query(
+      `INSERT INTO leads
+         (lead_id, status, identified_at, converted_at, name, phone, wilaya, baladiya,
+          delivery_type, merch_total_dzd, shipping_cost, total_dzd, source, origin, last_source, last_origin, origin_url,
+          order_ref, shopify_order_id, order_count, history)
+       VALUES ($1,'converted', now(), now(), $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$10,$11,$12,$13,$14,1,$15::jsonb)
+       ON CONFLICT (lead_id) DO UPDATE SET
+         status='converted', converted_at = COALESCE(leads.converted_at, now()), updated_at = now(),
+         order_ref = COALESCE(NULLIF(EXCLUDED.order_ref,''), leads.order_ref)
+       RETURNING lead_id`,
+      [
+        newId, clean(name, 120), ph, clean(wilaya, 120), clean(baladiya, 120),
+        clean(deliveryType, 60), intOrNull(merchTotalDzd), intOrNull(shippingCost), intOrNull(totalDzd),
+        clean(source, 60), clean(origin, 200), clean(originUrl, 1000),
+        clean(orderRef, 40), shopifyOrderId ? Number(shopifyOrderId) : null, history,
+      ]
+    );
+    return !!(ins && ins.rowCount > 0);
   } catch (err) {
     console.error('[leads-db] markLeadConverted failed:', err.message, `(lead ${id || ph})`);
     return false;

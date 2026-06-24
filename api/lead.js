@@ -28,6 +28,13 @@ export default async function handler(req, res) {
 
   const body = req.body || {};
 
+  // Arrival log — confirms the client beacon reached us (Railway logs).
+  console.log('[lead] beacon', JSON.stringify({
+    stage: body.stage || 'new', leadId: (body.leadId || '').slice(0, 24),
+    phoneOk: /^(05|06|07)\d{8}$/.test(String(body.phone || '').replace(/\s/g, '')),
+    origin: body.origin || '',
+  }));
+
   // Derive context the client can't be trusted to send (and shouldn't have to).
   const referrer  = body.referrer  || req.headers['referer'] || req.headers['referrer'] || '';
   const userAgent = req.headers['user-agent'] || '';

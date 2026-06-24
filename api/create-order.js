@@ -436,8 +436,13 @@ export default async function handler(req, res) {
     if (savedToDb) {
       // Link & convert the matching lead (funnel close). Fire-and-forget —
       // a missing lead (organic/direct submit) is fine, never blocks the order.
-      markLeadConverted({ leadId, orderRef: ref, phone: cleanPhone })
-        .catch(err => console.error('[order] lead convert error:', err?.message));
+      markLeadConverted({
+        leadId, orderRef: ref, phone: cleanPhone,
+        name: cleanName, wilaya: cleanWilaya, baladiya: cleanBaladiya,
+        deliveryType: deliveryType || 'توصيل للمنزل',
+        merchTotalDzd: merchDzd, shippingCost: shipDzd, totalDzd,
+        source: orderSource, origin, originUrl: sourceUrl || '',
+      }).catch(err => console.error('[order] lead convert error:', err?.message));
       markSessionConverted({ sessionId: funnelSessionId, leadId, phone: cleanPhone })
         .catch(err => console.error('[order] session convert error:', err?.message));
 
@@ -727,8 +732,13 @@ export default async function handler(req, res) {
       }).catch(err => console.error('[order] mirror insert error:', err?.message));
 
       // Link & convert the matching lead (funnel close) — fallback Shopify path.
-      markLeadConverted({ leadId, orderRef: ref, shopifyOrderId: order.order_id, phone: cleanPhone })
-        .catch(err => console.error('[order] lead convert error:', err?.message));
+      markLeadConverted({
+        leadId, orderRef: ref, shopifyOrderId: order.order_id, phone: cleanPhone,
+        name: cleanName, wilaya: cleanWilaya, baladiya: cleanBaladiya,
+        deliveryType: deliveryType || 'توصيل للمنزل',
+        merchTotalDzd: Math.max(totalDzd - shipDzd, 0), shippingCost: shipDzd, totalDzd,
+        source: orderSource, origin: productTitle || sourceUrl || '', originUrl: sourceUrl || '',
+      }).catch(err => console.error('[order] lead convert error:', err?.message));
       markSessionConverted({ sessionId: funnelSessionId, leadId, phone: cleanPhone })
         .catch(err => console.error('[order] session convert error:', err?.message));
     }

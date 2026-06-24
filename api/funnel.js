@@ -24,6 +24,13 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
 
   const body = req.body || {};
+
+  // Arrival log — confirms the client funnel beacon reached us (Railway logs).
+  console.log('[funnel] beacon', JSON.stringify({
+    step: body.step || (Array.isArray(body.steps) ? body.steps.join(',') : ''),
+    sid: (body.sessionId || '').slice(0, 24), origin: body.origin || '',
+  }));
+
   const referrer = body.referrer || req.headers['referer'] || req.headers['referrer'] || '';
 
   // Accept a single step or a small batch (the client may coalesce a few).
