@@ -16,6 +16,7 @@ import logErrorHandler         from './api/log-error.js';
 import leadHandler             from './api/lead.js';
 import funnelHandler           from './api/funnel.js';
 import { syncPageData }        from './api/sync-page-data.js';
+import { setCorsHeaders }      from './api/_security.js';
 import { pruneLeads }          from './api/_leads-db.js';
 import { pruneSessions }       from './api/_funnel-db.js';
 import { rollupClosedBuckets, pruneRollups, rollupHours } from './api/_funnel-rollup-db.js';
@@ -29,7 +30,10 @@ app.set('trust proxy', 1);
 // lead / funnel / log-error beacons send their JSON as text/plain to avoid a
 // preflight that sendBeacon cannot perform. type-is matches the Blob's
 // `text/plain;charset=UTF-8` against 'text/plain'.
-app.use(express.json({ limit: '5kb', type: ['application/json', 'text/plain'] }));
+// 16kb matches MAX_BODY_BYTES in api/_security.js — a real ad-click order
+// (fbclid/ttclid-laden URLs + bundle display items + Arabic text) runs 4–6 KB,
+// and the old 5kb limit here 413'd those orders before any handler ran.
+app.use(express.json({ limit: '16kb', type: ['application/json', 'text/plain'] }));
 
 // ── Root status page ──────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
@@ -142,6 +146,23 @@ cron.schedule('5 * * * *', async () => {
     console.error('[cron] Funnel rollup failed:', err.message);
   }
 }, { timezone: 'UTC' });
+
+// ── Error handler — body-parser (413/400) and route errors ───────────────────
+// Without this, an oversized/malformed body dies in express.json BEFORE any
+// handler sets CORS headers → the browser sees an opaque network failure and
+// the storefront can't distinguish it from the backend being down. Always
+// reply JSON with CORS so the order form gets a readable error + can report it.
+app.use((err, req, res, _next) => {
+  setCorsHeaders(req, res);
+  const status = err?.status || err?.statusCode || 500;
+  console.error(`[server] ${req.method} ${req.path} failed pre-handler:`, status, err?.message,
+    'content-length:', req.headers['content-length'] || '?');
+  if (res.headersSent) return;
+  res.status(status).json({
+    error: status === 413 ? 'Payload too large' : (status < 500 ? 'Bad request' : 'Server error'),
+    code:  status === 413 ? 'payload_too_large' : 'request_error',
+  });
+});
 
 // ── Startup sync — populate static file immediately on first deploy ───────────
 // Runs in background so it doesn't block the server from starting.
