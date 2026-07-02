@@ -340,6 +340,20 @@ export async function upsertLead(input = {}) {
  * fresh converted lead from the order data, so the leads table is always a
  * superset of orders (never "empty" after a real sale). Best-effort.
  */
+/** Fetch one lead row by leadId — used by the admin fire-event endpoint. */
+export async function getLeadById(leadId) {
+  const p = getPool();
+  if (!p || !leadId) return null;
+  try {
+    await ensureSchema(p);
+    const { rows } = await p.query('SELECT * FROM leads WHERE lead_id = $1', [String(leadId).slice(0, 80)]);
+    return rows[0] || null;
+  } catch (err) {
+    console.error('[leads-db] getLeadById failed:', err.message, `(leadId ${leadId})`);
+    return null;
+  }
+}
+
 export async function markLeadConverted({
   leadId = '', orderRef = '', shopifyOrderId = null, phone = '',
   name = '', wilaya = '', baladiya = '', deliveryType = '',

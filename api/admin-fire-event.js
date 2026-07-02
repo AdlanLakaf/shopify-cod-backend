@@ -23,6 +23,7 @@
 // ============================================================
 
 import { getOrderByRef } from './_orders-db.js';
+import { getLeadById }   from './_leads-db.js';
 import { trackPurchase } from './_tracking.js';
 
 const VALID_PLATFORMS = new Set(['meta', 'tiktok', 'ga4']);
@@ -37,42 +38,80 @@ export default async function handler(req, res) {
 
   const body = req.body || {};
   const ref = String(body.ref || '').trim().slice(0, 60);
+  const leadId = String(body.leadId || '').trim().slice(0, 80);
   const platforms = (Array.isArray(body.platforms) ? body.platforms : [])
     .map(p => String(p).toLowerCase())
     .filter(p => VALID_PLATFORMS.has(p));
 
-  if (!ref)              return res.status(400).json({ error: 'ref required' });
+  if (!ref && !leadId)   return res.status(400).json({ error: 'ref or leadId required' });
   if (!platforms.length) return res.status(400).json({ error: 'platforms required (meta|tiktok|ga4)' });
 
-  const order = await getOrderByRef(ref);
-  if (!order) return res.status(404).json({ error: `Order ${ref} not found` });
+  // ── Resolve the sale: an order row (by ref, or via the lead's order_ref),
+  //    else the lead row itself (staff-recovered sale with no order record).
+  let sale = null;      // normalised: { key, total, merch, qty, phone, name, city, state, variantId, title, sourceUrl }
+  const lead = !ref && leadId ? await getLeadById(leadId) : null;
+  const orderRef = ref || (lead?.order_ref ? String(lead.order_ref) : '');
+  const order = orderRef ? await getOrderByRef(orderRef) : null;
 
-  const items = Array.isArray(order.items) ? order.items : [];
-  const totalQty = items.reduce((n, it) => n + (Number(it.quantity) || 1), 0) || 1;
+  if (order) {
+    const items = Array.isArray(order.items) ? order.items : [];
+    const total = Number(order.total_dzd) || 0;
+    sale = {
+      key:       order.ref,
+      total,
+      merch:     Number(order.merch_total_dzd) || total,
+      qty:       items.reduce((n, it) => n + (Number(it.quantity) || 1), 0) || 1,
+      phone:     order.phone || '',
+      name:      order.name || '',
+      city:      order.baladiya || '',
+      state:     order.wilaya || '',
+      variantId: 0,
+      title:     items[0]?.title || order.origin || '',
+      sourceUrl: order.origin_url || '',
+    };
+  } else if (lead) {
+    const merch = Number(lead.merch_total_dzd) || 0;
+    const total = Number(lead.total_dzd) || (merch + (Number(lead.shipping_cost) || 0));
+    if (total <= 0) return res.status(400).json({ error: `Lead ${leadId} has no total value — cannot fire a purchase` });
+    sale = {
+      key:       `lead-${leadId}`,
+      total,
+      merch:     merch || total,
+      qty:       Math.max(1, Number(lead.quantity) || 1),
+      phone:     lead.phone || '',
+      name:      lead.name || '',
+      city:      lead.baladiya || '',
+      state:     lead.wilaya || '',
+      variantId: Number(lead.variant_id) || 0,
+      title:     lead.variant_title || lead.origin || '',
+      sourceUrl: lead.origin_url || '',
+    };
+  } else {
+    return res.status(404).json({ error: ref ? `Order ${ref} not found` : `Lead ${leadId} not found` });
+  }
+
   const valueOverride = Number(body.value);
-  const total = Number.isFinite(valueOverride) && valueOverride > 0
-    ? valueOverride
-    : Number(order.total_dzd) || 0;
-  const merch = Number(order.merch_total_dzd) || total;
+  const total = Number.isFinite(valueOverride) && valueOverride > 0 ? valueOverride : sale.total;
   const testCode = typeof body.testCode === 'string' ? body.testCode.slice(0, 60) : null;
 
-  console.log(`[admin-fire-event] ref:${ref} platforms:[${platforms.join(',')}] value:${total} by admin`);
+  console.log(`[admin-fire-event] ${sale.key} platforms:[${platforms.join(',')}] value:${total} by admin`);
 
   const results = await trackPurchase({
-    ref,
+    ref:        sale.key,
     total:      String(total),
-    unitPrice:  String((merch / totalQty).toFixed(2)),
-    variantId:  0,
-    quantity:   totalQty,
-    phone:      order.phone || '',
-    name:       order.name  || '',
-    city:       order.baladiya || '',
-    state:      order.wilaya   || '',
-    // Default eventId = ref: matches what create-order sends as fallback, so a
-    // re-fire of a recently-tracked order de-dupes instead of double-counting.
-    eventId:    String(body.eventId || ref).slice(0, 80),
-    productTitle: items[0]?.title || order.origin || '',
-    sourceUrl:  order.origin_url || '',
+    unitPrice:  String((sale.merch / sale.qty).toFixed(2)),
+    variantId:  sale.variantId,
+    quantity:   sale.qty,
+    phone:      sale.phone,
+    name:       sale.name,
+    city:       sale.city,
+    state:      sale.state,
+    // Default eventId = the sale key (order ref / lead id): matches what
+    // create-order sends as fallback, so a re-fire of a recently-tracked
+    // order de-dupes instead of double-counting.
+    eventId:    String(body.eventId || sale.key).slice(0, 80),
+    productTitle: sale.title,
+    sourceUrl:  sale.sourceUrl,
     skipGA4:    !platforms.includes('ga4'),
     skipMeta:   !platforms.includes('meta'),
     skipTikTok: !platforms.includes('tiktok'),
@@ -83,5 +122,5 @@ export default async function handler(req, res) {
   });
 
   const ok = results.every(r => r.ok);
-  return res.status(ok ? 200 : 502).json({ ok, ref, results });
+  return res.status(ok ? 200 : 502).json({ ok, ref: sale.key, results });
 }
