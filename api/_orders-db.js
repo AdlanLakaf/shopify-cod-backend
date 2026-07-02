@@ -135,6 +135,20 @@ export async function insertOrder(o) {
   }
 }
 
+/** Fetch one order row by ref — used by the admin fire-event endpoint. */
+export async function getOrderByRef(ref) {
+  const p = getPool();
+  if (!p || !ref) return null;
+  try {
+    await ensureSchema(p);
+    const { rows } = await p.query('SELECT * FROM orders WHERE ref = $1', [String(ref).slice(0, 60)]);
+    return rows[0] || null;
+  } catch (err) {
+    console.error('[orders-db] getOrderByRef failed:', err.message, `(ref ${ref})`);
+    return null;
+  }
+}
+
 /**
  * Record the outcome of the background Shopify push for an order that was
  * already saved to our DB (fast path). Either stamps the Shopify order id, or

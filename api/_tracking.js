@@ -305,6 +305,13 @@ export async function trackPurchase(data) {
     if (r.status === 'rejected')
       console.error(`[tracking][${labels[i]}] Purchase FAILED:`, r.reason?.message);
   });
+  // Per-platform outcome for callers that report back (admin fire-event).
+  // Existing callers (create-order) ignore the return value.
+  return results.map((r, i) => ({
+    platform: labels[i],
+    ok:       r.status === 'fulfilled',
+    error:    r.status === 'rejected' ? String(r.reason?.message || r.reason) : null,
+  }));
 }
 
 // Events that should never be sent to TikTok (Meta custom events with no TikTok equivalent).

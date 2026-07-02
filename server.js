@@ -15,6 +15,7 @@ import countHubsHandler        from './api/count-hubs.js';
 import logErrorHandler         from './api/log-error.js';
 import leadHandler             from './api/lead.js';
 import funnelHandler           from './api/funnel.js';
+import adminFireEventHandler   from './api/admin-fire-event.js';
 import { syncPageData }        from './api/sync-page-data.js';
 import { setCorsHeaders }      from './api/_security.js';
 import { pruneLeads }          from './api/_leads-db.js';
@@ -82,6 +83,9 @@ app.all('/api/count-hubs',         countHubsHandler);
 app.all('/api/log-error',          logErrorHandler);
 app.all('/api/lead',               leadHandler);
 app.all('/api/funnel',             funnelHandler);
+
+// ── Admin: manually fire ad conversion events (ADMIN_SECRET bearer) ──────────
+app.post('/api/admin/fire-event', adminFireEventHandler);
 
 // ── Manual sync trigger (protected with ADMIN_SECRET bearer token) ────────────
 app.post('/api/admin/sync-page-data', async (req, res) => {

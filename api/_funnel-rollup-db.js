@@ -109,9 +109,14 @@ export async function rollupClosedBuckets() {
     await client.query('BEGIN');
 
     // Start of the CURRENT (still-open) bucket — everything strictly before
-    // this is a closed window safe to summarise.
+    // this is a closed window safe to summarise. A session must ALSO be quiet
+    // (updated_at before the cutoff): a visitor who landed at 10:50 and is
+    // still filling the form at 11:05 must not be folded away mid-visit — that
+    // would re-create their row on the next step and double-count the session
+    // (once in the rollup, once live) while splitting its steps in two.
     const cutoffExpr = `to_timestamp(floor(extract(epoch from now()) / ${span}) * ${span})`;
     const bucketExpr = `to_timestamp(floor(extract(epoch from created_at) / ${span}) * ${span})`;
+    const quietExpr  = `created_at < ${cutoffExpr} AND updated_at < ${cutoffExpr}`;
 
     const ins = await client.query(`
       INSERT INTO funnel_rollups (bucket_start, bucket_hours, origin, source, sessions, converted, steps)
@@ -125,7 +130,7 @@ export async function rollupClosedBuckets() {
                ${STEP_JSONB}
              ) AS steps
         FROM sessions
-       WHERE created_at < ${cutoffExpr}
+       WHERE ${quietExpr}
        GROUP BY 1, 3, 4
       ON CONFLICT (bucket_start, bucket_hours, origin, source) DO UPDATE SET
         sessions  = funnel_rollups.sessions  + EXCLUDED.sessions,
@@ -138,7 +143,7 @@ export async function rollupClosedBuckets() {
         rolled_at = now()
     `);
 
-    const del = await client.query(`DELETE FROM sessions WHERE created_at < ${cutoffExpr}`);
+    const del = await client.query(`DELETE FROM sessions WHERE ${quietExpr}`);
     await client.query('COMMIT');
     if (del.rowCount) console.log(`[funnel-rollup] folded ${del.rowCount} session(s) into ${ins.rowCount} bucket(s) (${N}h)`);
     return del.rowCount || 0;
