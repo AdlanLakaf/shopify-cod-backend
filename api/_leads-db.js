@@ -118,16 +118,20 @@ const intOrNull = v => {
 };
 
 // Tracked fields that get a human-readable history entry when they change.
-// [inputKey, columnName, label]
+// [columnName, label] — the column name is ALSO the key in the normalised
+// `incoming` object (it's built with snake_case keys). Reading it with the
+// camelCase input key here was a long-lived bug: incoming['variantTitle'] is
+// undefined, so variant/delivery-type updates were silently dropped and every
+// lead stayed frozen on its first-beacon (usually default) variant.
 const NARRATED = [
-  ['name',         'name',          'name'],
-  ['phone',        'phone',         'phone number'],
-  ['wilaya',       'wilaya',        'wilaya'],
-  ['baladiya',     'baladiya',      'baladiya'],
-  ['office',       'office',        'office'],
-  ['deliveryType', 'delivery_type', 'delivery type'],
-  ['variantTitle', 'variant_title', 'variant'],
-  ['quantity',     'quantity',      'quantity'],
+  ['name',          'name'],
+  ['phone',         'phone number'],
+  ['wilaya',        'wilaya'],
+  ['baladiya',      'baladiya'],
+  ['office',        'office'],
+  ['delivery_type', 'delivery type'],
+  ['variant_title', 'variant'],
+  ['quantity',      'quantity'],
 ];
 
 // Status precedence — predictable, never silently downgrades, but lets an
@@ -249,8 +253,8 @@ export async function upsertLead(input = {}) {
     let wasUpdated = row.was_updated;
     const merge = {}; // column → final value
 
-    for (const [key, col, label] of NARRATED) {
-      const next = incoming[key];
+    for (const [col, label] of NARRATED) {
+      const next = incoming[col];
       const provided = (next !== '' && next !== null && next !== undefined);
       if (!provided) { merge[col] = row[col]; continue; }
       const old = row[col];
