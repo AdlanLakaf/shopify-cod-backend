@@ -29,6 +29,7 @@
 // ============================================================
 
 import { fetchWithTimeout, log } from './_security.js';
+import { adTypeFromTikTokObjective } from './_attribution.js';
 import { claimLead, markLeadOutcome, resolveMapping, getActivePageIds } from './_tiktok-db.js';
 import { insertOrder, updateOrderShopify, findRecentOrderByPhone } from './_orders-db.js';
 import { upsertLead, markLeadConverted } from './_leads-db.js';
@@ -80,32 +81,36 @@ async function ttPost(path, body = {}, timeoutMs = 10_000) {
   }
 }
 
-// ── Campaign / adgroup / ad name enrichment (24h in-memory cache) ────────────
-const nameCache = new Map(); // `${kind}:${id}` → { name, ts }
+// ── Campaign / adgroup / ad enrichment (24h in-memory cache) ─────────────────
+// Campaigns also carry objective_type — that's what classifies the lead's
+// ad_type (lead ad vs reach vs boost vs conversion) for the admin.
+const nameCache = new Map(); // `${kind}:${id}` → { name, objective, ts }
 const NAME_TTL = 24 * 60 * 60 * 1000;
 
-async function entityName(kind, id) {
-  if (!id) return '';
+async function entityMeta(kind, id) {
+  if (!id) return { name: '', objective: '' };
   const key = `${kind}:${id}`;
   const hit = nameCache.get(key);
-  if (hit && Date.now() - hit.ts < NAME_TTL) return hit.name;
+  if (hit && Date.now() - hit.ts < NAME_TTL) return hit;
   const advertiserId = process.env.TIKTOK_ADVERTISER_ID;
-  if (!advertiserId) return '';
+  if (!advertiserId) return { name: '', objective: '' };
   const cfg = {
     campaign: { path: '/campaign/get/', filter: 'campaign_ids', list: 'campaign_name' },
     adgroup:  { path: '/adgroup/get/',  filter: 'adgroup_ids',  list: 'adgroup_name' },
     ad:       { path: '/ad/get/',       filter: 'ad_ids',       list: 'ad_name' },
   }[kind];
-  if (!cfg) return '';
+  if (!cfg) return { name: '', objective: '' };
   const data = await ttGet(cfg.path, {
     advertiser_id: advertiserId,
     filtering: { [cfg.filter]: [String(id)] },
     page_size: 1,
   });
-  const name = data?.list?.[0]?.[cfg.list] || '';
-  nameCache.set(key, { name, ts: Date.now() });
-  return name;
+  const row = data?.list?.[0] || {};
+  const meta = { name: row[cfg.list] || '', objective: row.objective_type || '', ts: Date.now() };
+  nameCache.set(key, meta);
+  return meta;
 }
+const entityName = async (kind, id) => (await entityMeta(kind, id)).name;
 
 // ── Field extraction ─────────────────────────────────────────────────────────
 
@@ -222,10 +227,12 @@ export async function processTikTokLead({ tiktokLeadId, formId = '', pageId = ''
     }
     const name = fields.name || 'TikTok Lead';
 
-    // 2) Attribution names (best-effort, cached).
-    const [campaignName, adgroupName, adName] = await Promise.all([
-      entityName('campaign', campaignId), entityName('adgroup', adgroupId), entityName('ad', adId),
+    // 2) Attribution names + campaign objective (best-effort, cached).
+    const [campaignMeta, adgroupName, adName] = await Promise.all([
+      entityMeta('campaign', campaignId), entityName('adgroup', adgroupId), entityName('ad', adId),
     ]);
+    const campaignName = campaignMeta.name;
+    const adType = adTypeFromTikTokObjective(campaignMeta.objective);
     const originBits = [campaignName || campaignId, adName || adId].filter(Boolean);
     const origin = ('tt-form:' + originBits.join(' / ')).slice(0, 200);
 
@@ -234,7 +241,7 @@ export async function processTikTokLead({ tiktokLeadId, formId = '', pageId = ''
     await upsertLead({
       leadId: crmLeadId, stage: 'enriched',
       name, phone: fields.phone, wilaya: fields.wilaya,
-      source: 'tiktok_form', origin,
+      source: 'tiktok_form', origin, adType,
       originUrl: `tiktok://form/${formId || pageId || ''}`,
       entryUrl: [
         campaignId && `campaign:${campaignId}${campaignName ? ` (${campaignName})` : ''}`,
@@ -286,7 +293,7 @@ export async function processTikTokLead({ tiktokLeadId, formId = '', pageId = ''
       shippingCost: 0,
       items: [{ title: itemTitle, quantity: qty, priceDzd }],
       merchTotalDzd: merchDzd, totalDzd: merchDzd,
-      note, source: 'tiktok_form', origin,
+      note, source: 'tiktok_form', origin, adType,
     });
     if (!saved) {
       await markLeadOutcome(tiktokLeadId, { status: 'db_failed', failReason: 'orders DB insert failed' });
@@ -297,7 +304,7 @@ export async function processTikTokLead({ tiktokLeadId, formId = '', pageId = ''
     markLeadConverted({
       leadId: crmLeadId, orderRef: ref, phone: fields.phone, name,
       wilaya: fields.wilaya, merchTotalDzd: merchDzd, shippingCost: 0, totalDzd: merchDzd,
-      source: 'tiktok_form', origin,
+      source: 'tiktok_form', origin, adType,
     }).catch(err => console.error('[tiktok] lead convert error:', err?.message));
 
     // 7) Background Shopify push — never blocks, failure is flagged on the row.

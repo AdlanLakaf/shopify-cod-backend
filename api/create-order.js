@@ -10,7 +10,7 @@ import { trackPurchase } from './_tracking.js';
 import { insertOrder, updateOrderShopify } from './_orders-db.js';
 import { markLeadConverted } from './_leads-db.js';
 import { markSessionConverted } from './_funnel-db.js';
-import { detectSource, resolveAdPlatform } from './_attribution.js';
+import { detectSource, resolveAdPlatform, adTypeFromSource } from './_attribution.js';
 import { getTestMode }   from './_test-mode.js';
 
 // ── Idempotency — the same eventId never creates two orders ──────────────────
@@ -233,6 +233,8 @@ export default async function handler(req, res) {
   log(`[order] source detected: ${orderSource}`);
   // Attribution gate — only the hn_src 7-day window decides which CAPI fires.
   const adPlatform = resolveAdPlatform(trafficSource);
+  // Ad-type bucket (conversion_ad / organic_social / organic) for staff triage.
+  const adType = adTypeFromSource(orderSource);
 
   const algerianPhoneRegex = /^(05|06|07)\d{8}$/;
   if (!algerianPhoneRegex.test(cleanPhone)) {
@@ -431,6 +433,7 @@ export default async function handler(req, res) {
       origin,
       originUrl: sourceUrl || '',
       entryUrl:  entryUrl  || '',
+      adType,
     });
 
     if (savedToDb) {
@@ -442,7 +445,7 @@ export default async function handler(req, res) {
         deliveryType: deliveryType || 'توصيل للمنزل',
         merchTotalDzd: merchDzd, shippingCost: shipDzd, totalDzd,
         source: orderSource, origin, originUrl: sourceUrl || '',
-        imageUrl: displayItems[0]?.imageUrl || '',
+        imageUrl: displayItems[0]?.imageUrl || '', adType,
       }).catch(err => console.error('[order] lead convert error:', err?.message));
       markSessionConverted({ sessionId: funnelSessionId, leadId, phone: cleanPhone })
         .catch(err => console.error('[order] session convert error:', err?.message));
@@ -730,6 +733,7 @@ export default async function handler(req, res) {
         source:        orderSource,
         origin:        productTitle || sourceUrl || '',
         shopifyOrderId: order.order_id,
+        adType,
       }).catch(err => console.error('[order] mirror insert error:', err?.message));
 
       // Link & convert the matching lead (funnel close) — fallback Shopify path.
@@ -738,7 +742,7 @@ export default async function handler(req, res) {
         name: cleanName, wilaya: cleanWilaya, baladiya: cleanBaladiya,
         deliveryType: deliveryType || 'توصيل للمنزل',
         merchTotalDzd: Math.max(totalDzd - shipDzd, 0), shippingCost: shipDzd, totalDzd,
-        source: orderSource, origin: productTitle || sourceUrl || '', originUrl: sourceUrl || '',
+        source: orderSource, origin: productTitle || sourceUrl || '', originUrl: sourceUrl || '', adType,
       }).catch(err => console.error('[order] lead convert error:', err?.message));
       markSessionConverted({ sessionId: funnelSessionId, leadId, phone: cleanPhone })
         .catch(err => console.error('[order] session convert error:', err?.message));

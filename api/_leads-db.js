@@ -22,6 +22,7 @@
 // ============================================================
 
 import pg from 'pg';
+import { adTypeFromSource } from './_attribution.js';
 
 let pool = null;
 let schemaReady = null;
@@ -94,6 +95,7 @@ async function ensureSchema(p) {
     ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_source TEXT;
     ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_origin TEXT;
     ALTER TABLE leads ADD COLUMN IF NOT EXISTS image_url TEXT;
+    ALTER TABLE leads ADD COLUMN IF NOT EXISTS ad_type TEXT NOT NULL DEFAULT '';
   `).catch(err => {
     console.error('[leads-db] schema init failed:', err.message);
     schemaReady = null;          // allow a retry on the next call
@@ -188,6 +190,9 @@ export async function upsertLead(input = {}) {
     referrer:     clean(input.referrer, 1000),
     user_agent:   clean(input.userAgent, 300),
     fail_reason:  clean(input.failReason, 200),
+    // Explicit adType wins (TikTok form pipeline knows the campaign objective);
+    // otherwise derive the bucket from the source slug.
+    ad_type:      clean(input.adType, 30) || (input.source ? adTypeFromSource(clean(input.source, 60)) : ''),
   };
 
   let client;
@@ -227,11 +232,11 @@ export async function upsertLead(input = {}) {
            (lead_id, status, identified_at, submit_clicked_at, converted_at,
             name, phone, wilaya, baladiya, office, delivery_type,
             variant_id, variant_title, quantity, merch_total_dzd, shipping_cost, total_dzd,
-            source, origin, last_source, last_origin, origin_url, entry_url, referrer, user_agent, fail_reason, history, image_url)
+            source, origin, last_source, last_origin, origin_url, entry_url, referrer, user_agent, fail_reason, history, image_url, ad_type)
          VALUES ($1,$2, now(), $3, $4,
             $5,$6,$7,$8,$9,$10,
             $11,$12,$13,$14,$15,$16,
-            $17,$18,$17,$18,$19,$20,$21,$22,$23,$24::jsonb,$25)`,
+            $17,$18,$17,$18,$19,$20,$21,$22,$23,$24::jsonb,$25,$26)`,
         [
           leadId, status,
           stage === 'submitting' ? new Date() : null,
@@ -239,7 +244,7 @@ export async function upsertLead(input = {}) {
           incoming.name, incoming.phone, incoming.wilaya, incoming.baladiya, incoming.office, incoming.delivery_type,
           incoming.variant_id, incoming.variant_title, incoming.quantity, incoming.merch_total_dzd, incoming.shipping_cost, incoming.total_dzd,
           incoming.source, incoming.origin, incoming.origin_url, incoming.entry_url, incoming.referrer, incoming.user_agent, incoming.fail_reason,
-          JSON.stringify(history), incoming.image_url,
+          JSON.stringify(history), incoming.image_url, incoming.ad_type,
         ]
       );
       await client.query('COMMIT');
@@ -278,6 +283,7 @@ export async function upsertLead(input = {}) {
     merge.total_dzd       = keepOrSet('total_dzd',       incoming.total_dzd);
     merge.variant_id      = keepOrSet('variant_id',      incoming.variant_id);
     merge.image_url       = keepOrSet('image_url',       incoming.image_url);
+    merge.ad_type         = keepOrSet('ad_type',         incoming.ad_type);
     merge.source          = keepOrSet('source',          incoming.source);
     merge.origin          = keepOrSet('origin',          incoming.origin);
     merge.origin_url      = keepOrSet('origin_url',      incoming.origin_url);
@@ -314,7 +320,7 @@ export async function upsertLead(input = {}) {
          variant_id = $11, variant_title = $12, quantity = $13,
          merch_total_dzd = $14, shipping_cost = $15, total_dzd = $16,
          source = $17, origin = $18, origin_url = $19, entry_url = $20, referrer = $21, user_agent = $22,
-         fail_reason = $23, history = $24::jsonb, last_source = $25, last_origin = $26, image_url = $27
+         fail_reason = $23, history = $24::jsonb, last_source = $25, last_origin = $26, image_url = $27, ad_type = $28
        WHERE lead_id = $1`,
       [
         row.lead_id, status, wasUpdated, stage,
@@ -322,7 +328,7 @@ export async function upsertLead(input = {}) {
         merge.variant_id, merge.variant_title, merge.quantity,
         merge.merch_total_dzd, merge.shipping_cost, merge.total_dzd,
         merge.source, merge.origin, merge.origin_url, merge.entry_url, merge.referrer, merge.user_agent,
-        merge.fail_reason, JSON.stringify(history), merge.last_source, merge.last_origin, merge.image_url,
+        merge.fail_reason, JSON.stringify(history), merge.last_source, merge.last_origin, merge.image_url, merge.ad_type,
       ]
     );
     await client.query('COMMIT');
@@ -362,7 +368,7 @@ export async function markLeadConverted({
   leadId = '', orderRef = '', shopifyOrderId = null, phone = '',
   name = '', wilaya = '', baladiya = '', deliveryType = '',
   merchTotalDzd = null, shippingCost = null, totalDzd = null,
-  source = '', origin = '', originUrl = '', imageUrl = '',
+  source = '', origin = '', originUrl = '', imageUrl = '', adType = '',
 } = {}) {
   const p = getPool();
   if (!p) return false;
@@ -384,15 +390,17 @@ export async function markLeadConverted({
                   order_ref    = COALESCE(NULLIF($2,''), order_ref),
                   shopify_order_id = COALESCE($3, shopify_order_id),
                   image_url    = COALESCE(NULLIF($5,''), image_url),
+                  ad_type      = CASE WHEN COALESCE(ad_type,'') = '' THEN $6 ELSE ad_type END,
                   history = CASE WHEN ${isNewOrder}
                                  THEN COALESCE(history,'[]'::jsonb) || $4::jsonb
                                  ELSE COALESCE(history,'[]'::jsonb) END`;
     const img = clean(imageUrl, 1000);
+    const adt = clean(adType, 30) || (source ? adTypeFromSource(clean(source, 60)) : '');
     let res;
     if (id) {
       res = await p.query(
         `UPDATE leads SET ${sets} WHERE lead_id = $1 RETURNING lead_id`,
-        [id, clean(orderRef, 40), shopifyOrderId ? Number(shopifyOrderId) : null, entry, img]
+        [id, clean(orderRef, 40), shopifyOrderId ? Number(shopifyOrderId) : null, entry, img, adt]
       );
     }
     // Fall back to phone when no leadId match.
@@ -404,7 +412,7 @@ export async function markLeadConverted({
                WHERE phone = $1 AND status NOT IN ('converted','recovered')
                ORDER BY created_at DESC LIMIT 1
            ) RETURNING lead_id`,
-        [ph, clean(orderRef, 40), shopifyOrderId ? Number(shopifyOrderId) : null, entry, img]
+        [ph, clean(orderRef, 40), shopifyOrderId ? Number(shopifyOrderId) : null, entry, img, adt]
       );
     }
     if (res && res.rowCount > 0) return true;
@@ -420,8 +428,8 @@ export async function markLeadConverted({
       `INSERT INTO leads
          (lead_id, status, identified_at, converted_at, name, phone, wilaya, baladiya,
           delivery_type, merch_total_dzd, shipping_cost, total_dzd, source, origin, last_source, last_origin, origin_url,
-          order_ref, shopify_order_id, order_count, history, image_url)
-       VALUES ($1,'converted', now(), now(), $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$10,$11,$12,$13,$14,1,$15::jsonb,$16)
+          order_ref, shopify_order_id, order_count, history, image_url, ad_type)
+       VALUES ($1,'converted', now(), now(), $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$10,$11,$12,$13,$14,1,$15::jsonb,$16,$17)
        ON CONFLICT (lead_id) DO UPDATE SET
          status='converted', converted_at = COALESCE(leads.converted_at, now()), updated_at = now(),
          order_ref = COALESCE(NULLIF(EXCLUDED.order_ref,''), leads.order_ref),
@@ -431,7 +439,7 @@ export async function markLeadConverted({
         newId, clean(name, 120), ph, clean(wilaya, 120), clean(baladiya, 120),
         clean(deliveryType, 60), intOrNull(merchTotalDzd), intOrNull(shippingCost), intOrNull(totalDzd),
         clean(source, 60), clean(origin, 200), clean(originUrl, 1000),
-        clean(orderRef, 40), shopifyOrderId ? Number(shopifyOrderId) : null, history, img,
+        clean(orderRef, 40), shopifyOrderId ? Number(shopifyOrderId) : null, history, img, adt,
       ]
     );
     return !!(ins && ins.rowCount > 0);
