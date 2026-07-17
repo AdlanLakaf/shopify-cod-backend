@@ -77,7 +77,7 @@ setInterval(() => {
 // synchronous fallback path and the fire-and-forget background push of the
 // orders-DB-first fast path — keep the two behaviours identical by routing all
 // Shopify writes through here.
-async function pushOrderToShopify({ SHOP, TOKEN, API_VER, draftPayload, lineItems, merchTotalDzd, ref }) {
+export async function pushOrderToShopify({ SHOP, TOKEN, API_VER, draftPayload, lineItems, merchTotalDzd, ref }) {
   // 1) Create the draft
   const draftRes = await fetchWithTimeout(
     `https://${SHOP}/admin/api/${API_VER}/draft_orders.json`,

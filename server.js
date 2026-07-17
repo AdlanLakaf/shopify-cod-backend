@@ -16,6 +16,10 @@ import logErrorHandler         from './api/log-error.js';
 import leadHandler             from './api/lead.js';
 import funnelHandler           from './api/funnel.js';
 import adminFireEventHandler   from './api/admin-fire-event.js';
+import tiktokLeadHandler       from './api/tiktok-lead.js';
+import adminTiktokMapHandler   from './api/admin-tiktok-map.js';
+import { pollTikTokLeads }     from './api/_tiktok.js';
+import { pruneTiktokLeads }    from './api/_tiktok-db.js';
 import { syncPageData }        from './api/sync-page-data.js';
 import { setCorsHeaders }      from './api/_security.js';
 import { pruneLeads }          from './api/_leads-db.js';
@@ -84,8 +88,24 @@ app.all('/api/log-error',          logErrorHandler);
 app.all('/api/lead',               leadHandler);
 app.all('/api/funnel',             funnelHandler);
 
+// ── TikTok Lead Generation webhook (server-to-server, token in URL) ──────────
+app.all('/api/tiktok/lead', tiktokLeadHandler);
+
 // ── Admin: manually fire ad conversion events (ADMIN_SECRET bearer) ──────────
 app.post('/api/admin/fire-event', adminFireEventHandler);
+
+// ── Admin: TikTok form → product mapping rules (ADMIN_SECRET bearer) ─────────
+app.all('/api/admin/tiktok-map', adminTiktokMapHandler);
+
+// ── Admin: trigger the TikTok polling backup manually (ADMIN_SECRET bearer) ──
+app.post('/api/admin/tiktok-poll', async (req, res) => {
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret || req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const n = await pollTikTokLeads();
+  res.json({ ok: true, processed: n });
+});
 
 // ── Manual sync trigger (protected with ADMIN_SECRET bearer token) ────────────
 app.post('/api/admin/sync-page-data', async (req, res) => {
@@ -134,6 +154,26 @@ cron.schedule('0 23 * * *', async () => {
     if (removed) console.log(`[cron] Pruned ${removed} stale funnel rollup(s)`);
   } catch (err) {
     console.error('[cron] Rollup prune failed:', err.message);
+  }
+  try {
+    const removed = await pruneTiktokLeads();
+    if (removed) console.log(`[cron] Pruned ${removed} stale TikTok ledger row(s)`);
+  } catch (err) {
+    console.error('[cron] TikTok prune failed:', err.message);
+  }
+}, { timezone: 'UTC' });
+
+// ── TikTok polling backup — every 30 min, only when configured ───────────────
+// The webhook is the realtime path (TikTok retries 72h on failure); this poll
+// catches anything a prolonged outage missed. Everything funnels through the
+// tiktok_leads ledger, so webhook/poll overlap can never duplicate an order.
+// No-op unless TIKTOK_ACCESS_TOKEN + TIKTOK_ADVERTISER_ID + TIKTOK_PAGE_IDS set.
+cron.schedule('*/30 * * * *', async () => {
+  try {
+    const n = await pollTikTokLeads();
+    if (n) console.log(`[cron] TikTok poll processed ${n} lead(s)`);
+  } catch (err) {
+    console.error('[cron] TikTok poll failed:', err.message);
   }
 }, { timezone: 'UTC' });
 

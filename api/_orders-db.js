@@ -135,6 +135,31 @@ export async function insertOrder(o) {
   }
 }
 
+/**
+ * Most recent order for a phone within `hours` (optionally same source).
+ * Used by the TikTok lead pipeline: a customer double-submitting the form
+ * gets linked to their existing order instead of a duplicate. Best-effort.
+ */
+export async function findRecentOrderByPhone(phone, { source = '', hours = 24 } = {}) {
+  const p = getPool();
+  if (!p || !phone) return null;
+  try {
+    await ensureSchema(p);
+    const h = Math.min(Math.max(Number(hours) || 24, 1), 720);
+    const { rows } = await p.query(
+      `SELECT ref, created_at, status, source FROM orders
+        WHERE phone = $1 AND ($2 = '' OR source = $2)
+          AND created_at > now() - ($3 || ' hours')::interval
+        ORDER BY created_at DESC LIMIT 1`,
+      [String(phone).slice(0, 20), String(source).slice(0, 60), String(h)]
+    );
+    return rows[0] || null;
+  } catch (err) {
+    console.error('[orders-db] findRecentOrderByPhone failed:', err.message);
+    return null;
+  }
+}
+
 /** Fetch one order row by ref — used by the admin fire-event endpoint. */
 export async function getOrderByRef(ref) {
   const p = getPool();
