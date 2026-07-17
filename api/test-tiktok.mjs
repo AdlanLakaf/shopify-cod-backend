@@ -1,14 +1,14 @@
 // Live smoke test for the TikTok Business API connection.
 // Usage (PowerShell):
-//   $env:TIKTOK_ACCESS_TOKEN="..."; $env:TIKTOK_ADVERTISER_ID="..."; node api/test-tiktok.mjs
+//   $env:TIKTOK_MARKETING_TOKEN="..."; $env:TIKTOK_ADVERTISER_ID="..."; node api/test-tiktok.mjs
 // Verifies: token validity, advertiser access, lead-gen scope, and which
 // lead-detail endpoint variant this account answers on (the client in
 // _tiktok.js tries the same candidates in the same order).
 
 const TT = 'https://business-api.tiktok.com/open_api/v1.3';
-const token = process.env.TIKTOK_ACCESS_TOKEN;
+const token = process.env.TIKTOK_MARKETING_TOKEN;
 const adv   = process.env.TIKTOK_ADVERTISER_ID;
-if (!token || !adv) { console.error('Set TIKTOK_ACCESS_TOKEN and TIKTOK_ADVERTISER_ID'); process.exit(1); }
+if (!token || !adv) { console.error('Set TIKTOK_MARKETING_TOKEN and TIKTOK_ADVERTISER_ID'); process.exit(1); }
 
 async function tt(path, params = {}) {
   const qs = new URLSearchParams();

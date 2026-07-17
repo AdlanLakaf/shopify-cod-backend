@@ -18,7 +18,7 @@
 //  Shopify order in background (same pushOrderToShopify as the
 //  website) → mark lead converted.
 //
-//  Env: TIKTOK_ACCESS_TOKEN, TIKTOK_ADVERTISER_ID (enrichment +
+//  Env: TIKTOK_MARKETING_TOKEN, TIKTOK_ADVERTISER_ID (enrichment +
 //  polling), TIKTOK_WEBHOOK_TOKEN (shared-secret on the
 //  callback URL), TIKTOK_PAGE_IDS (comma list, enables polling).
 //
@@ -38,7 +38,7 @@ const TT_BASE = 'https://business-api.tiktok.com/open_api/v1.3';
 
 // ── Low-level TikTok Business API call ───────────────────────────────────────
 async function ttGet(path, params = {}, timeoutMs = 10_000) {
-  const token = process.env.TIKTOK_ACCESS_TOKEN;
+  const token = process.env.TIKTOK_MARKETING_TOKEN;
   if (!token) return null;
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
@@ -60,7 +60,7 @@ async function ttGet(path, params = {}, timeoutMs = 10_000) {
 }
 
 async function ttPost(path, body = {}, timeoutMs = 10_000) {
-  const token = process.env.TIKTOK_ACCESS_TOKEN;
+  const token = process.env.TIKTOK_MARKETING_TOKEN;
   if (!token) return null;
   try {
     const res = await fetchWithTimeout(`${TT_BASE}${path}`, {
@@ -332,7 +332,7 @@ export async function processTikTokLead({ tiktokLeadId, formId = '', pageId = ''
 export async function pollTikTokLeads() {
   const advertiserId = process.env.TIKTOK_ADVERTISER_ID;
   const pageIds = String(process.env.TIKTOK_PAGE_IDS || '').split(',').map(x => x.trim()).filter(Boolean);
-  if (!process.env.TIKTOK_ACCESS_TOKEN || !advertiserId || !pageIds.length) return 0;
+  if (!process.env.TIKTOK_MARKETING_TOKEN || !advertiserId || !pageIds.length) return 0;
 
   let imported = 0;
   for (const pageId of pageIds) {
