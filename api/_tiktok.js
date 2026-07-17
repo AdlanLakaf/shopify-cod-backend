@@ -29,7 +29,7 @@
 // ============================================================
 
 import { fetchWithTimeout, log } from './_security.js';
-import { claimLead, markLeadOutcome, resolveMapping } from './_tiktok-db.js';
+import { claimLead, markLeadOutcome, resolveMapping, getActivePageIds } from './_tiktok-db.js';
 import { insertOrder, updateOrderShopify, findRecentOrderByPhone } from './_orders-db.js';
 import { upsertLead, markLeadConverted } from './_leads-db.js';
 import { pushOrderToShopify } from './create-order.js';
@@ -331,8 +331,12 @@ export async function processTikTokLead({ tiktokLeadId, formId = '', pageId = ''
 // processTikTokLead, so overlap with webhooks is harmless.
 export async function pollTikTokLeads() {
   const advertiserId = process.env.TIKTOK_ADVERTISER_ID;
-  const pageIds = String(process.env.TIKTOK_PAGE_IDS || '').split(',').map(x => x.trim()).filter(Boolean);
-  if (!process.env.TIKTOK_MARKETING_TOKEN || !advertiserId || !pageIds.length) return 0;
+  if (!process.env.TIKTOK_MARKETING_TOKEN || !advertiserId) return 0;
+  // Pages are staff-managed in the admin (tiktok_pages table); the env var
+  // remains as an optional extra so nothing breaks if someone still sets it.
+  const envIds = String(process.env.TIKTOK_PAGE_IDS || '').split(',').map(x => x.trim()).filter(Boolean);
+  const pageIds = [...new Set([...(await getActivePageIds()), ...envIds])];
+  if (!pageIds.length) return 0;
 
   let imported = 0;
   for (const pageId of pageIds) {

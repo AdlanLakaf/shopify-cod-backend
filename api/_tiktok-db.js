@@ -64,6 +64,13 @@ async function ensureSchema(p) {
     );
     CREATE INDEX IF NOT EXISTS tiktok_leads_created_idx ON tiktok_leads (created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS tiktok_pages (
+      page_id     TEXT PRIMARY KEY,     -- TikTok instant-form page id (polling backup)
+      label       TEXT,                 -- staff-friendly name ("Ramadan offer form")
+      active      BOOLEAN NOT NULL DEFAULT true,
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
     CREATE TABLE IF NOT EXISTS tiktok_map (
       match_type  TEXT NOT NULL,          -- 'ad' | 'adgroup' | 'form' | 'campaign' | 'default'
       match_id    TEXT NOT NULL,          -- the TikTok id ('*' for default)
@@ -206,23 +213,73 @@ export async function deleteMapping(matchType, matchId) {
   }
 }
 
-/** List all mapping rules + recent ledger rows (admin dashboard). */
+/** List all mapping rules + polling pages + recent ledger rows (admin dashboard). */
 export async function listMappingsAndRecent(limit = 50) {
   const p = getPool();
-  if (!p) return { mappings: [], recent: [] };
+  if (!p) return { mappings: [], pages: [], recent: [] };
   try {
     await ensureSchema(p);
-    const [maps, recent] = await Promise.all([
+    const [maps, pages, recent] = await Promise.all([
       p.query('SELECT * FROM tiktok_map ORDER BY match_type, match_id'),
+      p.query('SELECT * FROM tiktok_pages ORDER BY updated_at DESC'),
       p.query(`SELECT tiktok_lead_id, created_at, processed_at, status, via, form_id,
                       campaign_id, adgroup_id, ad_id, order_ref, fail_reason
                  FROM tiktok_leads ORDER BY created_at DESC LIMIT $1`,
         [Math.min(Math.max(Number(limit) || 50, 1), 200)]),
     ]);
-    return { mappings: maps.rows, recent: recent.rows };
+    return { mappings: maps.rows, pages: pages.rows, recent: recent.rows };
   } catch (err) {
     console.error('[tiktok-db] list failed:', err.message);
-    return { mappings: [], recent: [] };
+    return { mappings: [], pages: [], recent: [] };
+  }
+}
+
+// ── Polling pages (staff-managed in the admin, not env) ──────────────────────
+
+/** Upsert one polling page (admin). */
+export async function upsertPage({ pageId, label = '', active = true }) {
+  const p = getPool();
+  const id = s(pageId, 80).replace(/\D/g, '');   // TikTok ids are numeric
+  if (!p || !id) return false;
+  try {
+    await ensureSchema(p);
+    await p.query(
+      `INSERT INTO tiktok_pages (page_id, label, active, updated_at) VALUES ($1,$2,$3, now())
+       ON CONFLICT (page_id) DO UPDATE SET label = EXCLUDED.label, active = EXCLUDED.active, updated_at = now()`,
+      [id, s(label, 120), active !== false]
+    );
+    return true;
+  } catch (err) {
+    console.error('[tiktok-db] upsertPage failed:', err.message);
+    return false;
+  }
+}
+
+/** Delete one polling page (admin). */
+export async function deletePage(pageId) {
+  const p = getPool();
+  if (!p) return false;
+  try {
+    await ensureSchema(p);
+    const res = await p.query('DELETE FROM tiktok_pages WHERE page_id = $1', [s(pageId, 80)]);
+    return res.rowCount > 0;
+  } catch (err) {
+    console.error('[tiktok-db] deletePage failed:', err.message);
+    return false;
+  }
+}
+
+/** Active page ids for the polling cron (DB-managed; env is a legacy extra). */
+export async function getActivePageIds() {
+  const p = getPool();
+  if (!p) return [];
+  try {
+    await ensureSchema(p);
+    const { rows } = await p.query('SELECT page_id FROM tiktok_pages WHERE active = true');
+    return rows.map(r => r.page_id);
+  } catch (err) {
+    console.error('[tiktok-db] getActivePageIds failed:', err.message);
+    return [];
   }
 }
 

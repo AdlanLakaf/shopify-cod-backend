@@ -18,6 +18,7 @@ import funnelHandler           from './api/funnel.js';
 import adminFireEventHandler   from './api/admin-fire-event.js';
 import tiktokLeadHandler       from './api/tiktok-lead.js';
 import adminTiktokMapHandler   from './api/admin-tiktok-map.js';
+import adminShopifyVariantsHandler from './api/admin-shopify-variants.js';
 import { pollTikTokLeads }     from './api/_tiktok.js';
 import { pruneTiktokLeads }    from './api/_tiktok-db.js';
 import { syncPageData }        from './api/sync-page-data.js';
@@ -96,6 +97,9 @@ app.post('/api/admin/fire-event', adminFireEventHandler);
 
 // ── Admin: TikTok form → product mapping rules (ADMIN_SECRET bearer) ─────────
 app.all('/api/admin/tiktok-map', adminTiktokMapHandler);
+
+// ── Admin: Shopify variant picker for TikTok mappings (ADMIN_SECRET bearer) ──
+app.all('/api/admin/shopify-variants', adminShopifyVariantsHandler);
 
 // ── Admin: trigger the TikTok polling backup manually (ADMIN_SECRET bearer) ──
 app.post('/api/admin/tiktok-poll', async (req, res) => {
