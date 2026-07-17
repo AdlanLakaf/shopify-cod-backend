@@ -86,6 +86,8 @@ async function ensureSchema(p) {
     );
     -- Migrate pre-answer_match deployments: add the column, re-key the PK.
     ALTER TABLE tiktok_map ADD COLUMN IF NOT EXISTS answer_match TEXT NOT NULL DEFAULT '';
+    ALTER TABLE tiktok_map ADD COLUMN IF NOT EXISTS image_url  TEXT NOT NULL DEFAULT '';
+    ALTER TABLE tiktok_map ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
     DO $$ BEGIN
       IF (SELECT count(*) FROM information_schema.key_column_usage
             WHERE table_name = 'tiktok_map' AND constraint_name = 'tiktok_map_pkey') = 2 THEN
@@ -179,7 +181,8 @@ export async function resolveMapping({ adId = '', adgroupId = '', formId = '', c
       .filter(r => !r.answer_match || (txt && txt.includes(r.answer_match.toLowerCase())))
       .sort((a, b) =>
         ((a.answer_match ? 0 : 10) + (spec[a.match_type] ?? 9)) -
-        ((b.answer_match ? 0 : 10) + (spec[b.match_type] ?? 9)));
+        ((b.answer_match ? 0 : 10) + (spec[b.match_type] ?? 9)) ||
+        (a.sort_order ?? 0) - (b.sort_order ?? 0));
     return candidates[0] || null;
   } catch (err) {
     console.error('[tiktok-db] resolveMapping failed:', err.message);
@@ -187,8 +190,8 @@ export async function resolveMapping({ adId = '', adgroupId = '', formId = '', c
   }
 }
 
-/** Upsert one mapping rule (admin). */
-export async function upsertMapping({ matchType, matchId, answerMatch = '', variantId = null, title = '', priceDzd = 0, quantity = 1, active = true, note = '' }) {
+/** Upsert one mapping rule (admin). New rules append to their group's order. */
+export async function upsertMapping({ matchType, matchId, answerMatch = '', variantId = null, title = '', priceDzd = 0, quantity = 1, active = true, note = '', imageUrl = '', sortOrder = null }) {
   const p = getPool();
   if (!p) return false;
   const type = s(matchType, 20).toLowerCase();
@@ -197,23 +200,54 @@ export async function upsertMapping({ matchType, matchId, answerMatch = '', vari
   if (!id) return false;
   try {
     await ensureSchema(p);
+    let sort = Number.isFinite(Number(sortOrder)) && sortOrder !== null ? Math.round(Number(sortOrder)) : null;
+    if (sort === null) {
+      const { rows } = await p.query(
+        'SELECT COALESCE(MAX(sort_order) + 1, 0) AS next FROM tiktok_map WHERE match_type = $1 AND match_id = $2',
+        [type, id]);
+      sort = rows[0]?.next ?? 0;
+    }
     await p.query(
-      `INSERT INTO tiktok_map (match_type, match_id, answer_match, variant_id, title, price_dzd, quantity, active, note, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+      `INSERT INTO tiktok_map (match_type, match_id, answer_match, variant_id, title, price_dzd, quantity, active, note, image_url, sort_order, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
        ON CONFLICT (match_type, match_id, answer_match) DO UPDATE SET
          variant_id = EXCLUDED.variant_id, title = EXCLUDED.title,
          price_dzd = EXCLUDED.price_dzd, quantity = EXCLUDED.quantity,
-         active = EXCLUDED.active, note = EXCLUDED.note, updated_at = now()`,
+         active = EXCLUDED.active, note = EXCLUDED.note,
+         image_url = CASE WHEN EXCLUDED.image_url <> '' THEN EXCLUDED.image_url ELSE tiktok_map.image_url END,
+         sort_order = CASE WHEN $12 THEN EXCLUDED.sort_order ELSE tiktok_map.sort_order END,
+         updated_at = now()`,
       [type, id, s(answerMatch, 120),
        variantId ? Number(variantId) : null,
        s(title, 200),
        Math.max(0, Math.round(Number(priceDzd) || 0)),
        Math.min(Math.max(Math.round(Number(quantity) || 1), 1), 10),
-       active !== false, s(note, 300)]
+       active !== false, s(note, 300), s(imageUrl, 1000), sort,
+       sortOrder !== null]   // explicit sortOrder → apply it; otherwise keep existing on update
     );
     return true;
   } catch (err) {
     console.error('[tiktok-db] upsertMapping failed:', err.message);
+    return false;
+  }
+}
+
+/** Batch-apply a new order within groups: items = [{matchType, matchId, answerMatch, sortOrder}]. */
+export async function reorderMappings(items = []) {
+  const p = getPool();
+  if (!p || !Array.isArray(items) || !items.length) return false;
+  try {
+    await ensureSchema(p);
+    for (const it of items.slice(0, 100)) {
+      await p.query(
+        `UPDATE tiktok_map SET sort_order = $4, updated_at = now()
+          WHERE match_type = $1 AND match_id = $2 AND answer_match = $3`,
+        [s(it.matchType, 20).toLowerCase(), s(it.matchId, 80), s(it.answerMatch, 120),
+         Math.round(Number(it.sortOrder) || 0)]);
+    }
+    return true;
+  } catch (err) {
+    console.error('[tiktok-db] reorderMappings failed:', err.message);
     return false;
   }
 }
@@ -240,7 +274,7 @@ export async function listMappingsAndRecent(limit = 50) {
   try {
     await ensureSchema(p);
     const [maps, pages, recent] = await Promise.all([
-      p.query('SELECT * FROM tiktok_map ORDER BY match_type, match_id'),
+      p.query('SELECT * FROM tiktok_map ORDER BY match_type, match_id, sort_order, answer_match'),
       p.query('SELECT * FROM tiktok_pages ORDER BY updated_at DESC'),
       p.query(`SELECT tiktok_lead_id, created_at, processed_at, status, via, form_id,
                       campaign_id, adgroup_id, ad_id, order_ref, fail_reason

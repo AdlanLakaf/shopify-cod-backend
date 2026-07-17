@@ -15,7 +15,7 @@
 //  (default needs no matchId). Most specific active rule wins.
 // ============================================================
 
-import { upsertMapping, deleteMapping, listMappingsAndRecent, upsertPage, deletePage } from './_tiktok-db.js';
+import { upsertMapping, deleteMapping, reorderMappings, listMappingsAndRecent, upsertPage, deletePage } from './_tiktok-db.js';
 import { getVariantInfo } from './_shopify-catalog.js';
 
 export default async function handler(req, res) {
@@ -37,20 +37,28 @@ export default async function handler(req, res) {
       if (!b.matchType || (b.matchType !== 'default' && !b.matchId)) {
         return res.status(400).json({ error: 'matchType (+ matchId unless default) required' });
       }
-      let { variantId = null, title = '', priceDzd = 0 } = b;
-      // Staff picked a variant → pull authoritative title/price from Shopify so
-      // the CRM order line and the Shopify line always agree.
-      if (variantId && (!title || !(Number(priceDzd) > 0))) {
+      let { variantId = null, title = '', priceDzd = 0, imageUrl = '' } = b;
+      // Staff picked a variant → pull authoritative title/price/image from
+      // Shopify so the CRM order line and the Shopify line always agree.
+      if (variantId && (!title || !(Number(priceDzd) > 0) || !imageUrl)) {
         const info = await getVariantInfo(variantId);
         if (!info) return res.status(400).json({ error: `Variant ${variantId} not found in Shopify` });
         title    = title || info.title || 'Shopify variant';
         priceDzd = Number(priceDzd) > 0 ? priceDzd : info.priceDzd;
+        imageUrl = imageUrl || info.image || '';
       }
       if (!variantId && !(title && Number(priceDzd) > 0)) {
         return res.status(400).json({ error: 'need variantId, or title + priceDzd' });
       }
-      const ok = await upsertMapping({ ...b, variantId, title, priceDzd });
-      return res.status(ok ? 200 : 500).json({ ok, applied: { variantId, title, priceDzd } });
+      const ok = await upsertMapping({ ...b, variantId, title, priceDzd, imageUrl });
+      return res.status(ok ? 200 : 500).json({ ok, applied: { variantId, title, priceDzd, imageUrl } });
+    }
+    case 'reorderMappings': {
+      if (!Array.isArray(b.items) || !b.items.length) {
+        return res.status(400).json({ error: 'items[] required' });
+      }
+      const ok = await reorderMappings(b.items);
+      return res.status(ok ? 200 : 500).json({ ok });
     }
     case 'deleteMapping': {
       const ok = await deleteMapping(b.matchType, b.matchType === 'default' ? '*' : b.matchId, b.answerMatch || '');

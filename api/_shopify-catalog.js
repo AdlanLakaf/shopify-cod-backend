@@ -57,14 +57,14 @@ export async function listVariants() {
   }
 }
 
-/** One variant's { title, priceDzd } (product + variant title joined) or null. */
+/** One variant's { title, priceDzd, image } (product + variant title joined) or null. */
 export async function getVariantInfo(variantId) {
   const id = Number(variantId);
   if (!id) return null;
   const all = await listVariants();
   const hit = all.find(v => v.variantId === id);
   if (hit) {
-    return { title: hit.variantTitle ? `${hit.productTitle} — ${hit.variantTitle}` : hit.productTitle, priceDzd: hit.priceDzd };
+    return { title: hit.variantTitle ? `${hit.productTitle} — ${hit.variantTitle}` : hit.productTitle, priceDzd: hit.priceDzd, image: hit.image || '' };
   }
   // Not in the active-products cache (draft product / brand-new variant) — direct lookup.
   const c = creds();
@@ -75,7 +75,7 @@ export async function getVariantInfo(variantId) {
       { headers: { 'X-Shopify-Access-Token': c.TOKEN } }, 10_000);
     if (!res.ok) return null;
     const v = (await res.json()).variant;
-    return v ? { title: v.title === 'Default Title' ? '' : v.title, priceDzd: Math.round(parseFloat(v.price) || 0) } : null;
+    return v ? { title: v.title === 'Default Title' ? '' : v.title, priceDzd: Math.round(parseFloat(v.price) || 0), image: '' } : null;
   } catch (err) {
     console.error('[catalog] getVariantInfo failed:', err.message);
     return null;
