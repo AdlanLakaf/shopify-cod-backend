@@ -253,8 +253,10 @@ export async function processTikTokLead({ tiktokLeadId, formId = '', pageId = ''
       return;
     }
 
-    // 5) Resolve WHAT they're buying.
-    const map = await resolveMapping({ adId, adgroupId, formId: formId || pageId, campaignId });
+    // 5) Resolve WHAT they're buying — the form answers participate, so a
+    //    "which offer?" question in the form can select the exact variant.
+    const answersText = fields.answers.map(x => `${x.q} ${x.a}`).join(' \n ');
+    const map = await resolveMapping({ adId, adgroupId, formId: formId || pageId, campaignId, answersText });
     if (!map || (!map.variant_id && !(map.title && map.price_dzd > 0))) {
       await markLeadOutcome(tiktokLeadId, { status: 'no_mapping', failReason: `no product mapping (ad ${adId || '-'} / form ${formId || pageId || '-'} / campaign ${campaignId || '-'})` });
       console.warn(`[tiktok] lead ${tiktokLeadId}: no product mapping — CRM lead saved, order NOT created. Configure /api/admin/tiktok-map`);

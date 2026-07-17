@@ -53,7 +53,7 @@ export default async function handler(req, res) {
       return res.status(ok ? 200 : 500).json({ ok, applied: { variantId, title, priceDzd } });
     }
     case 'deleteMapping': {
-      const ok = await deleteMapping(b.matchType, b.matchType === 'default' ? '*' : b.matchId);
+      const ok = await deleteMapping(b.matchType, b.matchType === 'default' ? '*' : b.matchId, b.answerMatch || '');
       return res.status(ok ? 200 : 404).json({ ok });
     }
     case 'upsertPage': {

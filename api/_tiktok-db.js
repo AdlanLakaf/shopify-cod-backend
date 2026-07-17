@@ -72,17 +72,27 @@ async function ensureSchema(p) {
     );
 
     CREATE TABLE IF NOT EXISTS tiktok_map (
-      match_type  TEXT NOT NULL,          -- 'ad' | 'adgroup' | 'form' | 'campaign' | 'default'
-      match_id    TEXT NOT NULL,          -- the TikTok id ('*' for default)
-      variant_id  BIGINT,                 -- Shopify variant (preferred — real catalog line)
-      title       TEXT,                   -- fallback custom line title when no variant
-      price_dzd   INTEGER NOT NULL DEFAULT 0,
-      quantity    INTEGER NOT NULL DEFAULT 1,
-      active      BOOLEAN NOT NULL DEFAULT true,
-      note        TEXT,
-      updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (match_type, match_id)
+      match_type   TEXT NOT NULL,          -- 'ad' | 'adgroup' | 'form' | 'campaign' | 'default'
+      match_id     TEXT NOT NULL,          -- the TikTok id ('*' for default)
+      answer_match TEXT NOT NULL DEFAULT '', -- optional: rule applies only when a form answer contains this text
+      variant_id   BIGINT,                 -- Shopify variant (preferred — real catalog line)
+      title        TEXT,                   -- fallback custom line title when no variant
+      price_dzd    INTEGER NOT NULL DEFAULT 0,
+      quantity     INTEGER NOT NULL DEFAULT 1,
+      active       BOOLEAN NOT NULL DEFAULT true,
+      note         TEXT,
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (match_type, match_id, answer_match)
     );
+    -- Migrate pre-answer_match deployments: add the column, re-key the PK.
+    ALTER TABLE tiktok_map ADD COLUMN IF NOT EXISTS answer_match TEXT NOT NULL DEFAULT '';
+    DO $$ BEGIN
+      IF (SELECT count(*) FROM information_schema.key_column_usage
+            WHERE table_name = 'tiktok_map' AND constraint_name = 'tiktok_map_pkey') = 2 THEN
+        ALTER TABLE tiktok_map DROP CONSTRAINT tiktok_map_pkey;
+        ALTER TABLE tiktok_map ADD PRIMARY KEY (match_type, match_id, answer_match);
+      END IF;
+    END $$;
   `).catch(err => {
     console.error('[tiktok-db] schema init failed:', err.message);
     schemaReady = null;
@@ -137,10 +147,17 @@ export async function markLeadOutcome(tiktokLeadId, { status, orderRef = '', fai
 }
 
 /**
- * Resolve the product mapping for a lead: most specific active rule wins.
- * ad → adgroup → form → campaign → default. Returns the row or null.
+ * Resolve the product mapping for a lead.
+ *
+ * Two dimensions, in priority order:
+ *  1. answer rules — `answer_match` set and found (case-insensitive) inside the
+ *     lead's form answers. This is how a form question like "which offer?"
+ *     selects the right Shopify variant per customer choice.
+ *  2. scope specificity — ad → adgroup → form → campaign → default.
+ * An answer rule that doesn't match this lead's answers is skipped entirely.
+ * Returns the winning row or null.
  */
-export async function resolveMapping({ adId = '', adgroupId = '', formId = '', campaignId = '' }) {
+export async function resolveMapping({ adId = '', adgroupId = '', formId = '', campaignId = '', answersText = '' }) {
   const p = getPool();
   if (!p) return null;
   try {
@@ -153,14 +170,17 @@ export async function resolveMapping({ adId = '', adgroupId = '', formId = '', c
           (match_type = 'form'     AND match_id = $3) OR
           (match_type = 'campaign' AND match_id = $4) OR
           (match_type = 'default')
-        )
-        ORDER BY CASE match_type
-          WHEN 'ad' THEN 0 WHEN 'adgroup' THEN 1 WHEN 'form' THEN 2
-          WHEN 'campaign' THEN 3 ELSE 4 END
-        LIMIT 1`,
+        )`,
       [s(adId, 80), s(adgroupId, 80), s(formId, 80), s(campaignId, 80)]
     );
-    return rows[0] || null;
+    const spec = { ad: 0, adgroup: 1, form: 2, campaign: 3, default: 4 };
+    const txt = String(answersText || '').toLowerCase();
+    const candidates = rows
+      .filter(r => !r.answer_match || (txt && txt.includes(r.answer_match.toLowerCase())))
+      .sort((a, b) =>
+        ((a.answer_match ? 0 : 10) + (spec[a.match_type] ?? 9)) -
+        ((b.answer_match ? 0 : 10) + (spec[b.match_type] ?? 9)));
+    return candidates[0] || null;
   } catch (err) {
     console.error('[tiktok-db] resolveMapping failed:', err.message);
     return null;
@@ -168,7 +188,7 @@ export async function resolveMapping({ adId = '', adgroupId = '', formId = '', c
 }
 
 /** Upsert one mapping rule (admin). */
-export async function upsertMapping({ matchType, matchId, variantId = null, title = '', priceDzd = 0, quantity = 1, active = true, note = '' }) {
+export async function upsertMapping({ matchType, matchId, answerMatch = '', variantId = null, title = '', priceDzd = 0, quantity = 1, active = true, note = '' }) {
   const p = getPool();
   if (!p) return false;
   const type = s(matchType, 20).toLowerCase();
@@ -178,13 +198,13 @@ export async function upsertMapping({ matchType, matchId, variantId = null, titl
   try {
     await ensureSchema(p);
     await p.query(
-      `INSERT INTO tiktok_map (match_type, match_id, variant_id, title, price_dzd, quantity, active, note, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())
-       ON CONFLICT (match_type, match_id) DO UPDATE SET
+      `INSERT INTO tiktok_map (match_type, match_id, answer_match, variant_id, title, price_dzd, quantity, active, note, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+       ON CONFLICT (match_type, match_id, answer_match) DO UPDATE SET
          variant_id = EXCLUDED.variant_id, title = EXCLUDED.title,
          price_dzd = EXCLUDED.price_dzd, quantity = EXCLUDED.quantity,
          active = EXCLUDED.active, note = EXCLUDED.note, updated_at = now()`,
-      [type, id,
+      [type, id, s(answerMatch, 120),
        variantId ? Number(variantId) : null,
        s(title, 200),
        Math.max(0, Math.round(Number(priceDzd) || 0)),
@@ -199,13 +219,13 @@ export async function upsertMapping({ matchType, matchId, variantId = null, titl
 }
 
 /** Delete one mapping rule (admin). */
-export async function deleteMapping(matchType, matchId) {
+export async function deleteMapping(matchType, matchId, answerMatch = '') {
   const p = getPool();
   if (!p) return false;
   try {
     await ensureSchema(p);
-    const res = await p.query('DELETE FROM tiktok_map WHERE match_type = $1 AND match_id = $2',
-      [s(matchType, 20).toLowerCase(), s(matchId, 80)]);
+    const res = await p.query('DELETE FROM tiktok_map WHERE match_type = $1 AND match_id = $2 AND answer_match = $3',
+      [s(matchType, 20).toLowerCase(), s(matchId, 80), s(answerMatch, 120)]);
     return res.rowCount > 0;
   } catch (err) {
     console.error('[tiktok-db] deleteMapping failed:', err.message);
