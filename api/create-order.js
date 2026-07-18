@@ -8,6 +8,7 @@
 import { runSecurityChecks, verifyTurnstile, fetchWithTimeout, log } from './_security.js';
 import { trackPurchase } from './_tracking.js';
 import { insertOrder, updateOrderShopify } from './_orders-db.js';
+import { assignOrderToShop } from './_pos-db.js';
 import { markLeadConverted } from './_leads-db.js';
 import { markSessionConverted } from './_funnel-db.js';
 import { detectSource, resolveAdPlatform, adTypeFromSource } from './_attribution.js';
@@ -450,6 +451,16 @@ export default async function handler(req, res) {
       markSessionConverted({ sessionId: funnelSessionId, leadId, phone: cleanPhone })
         .catch(err => console.error('[order] session convert error:', err?.message));
 
+      // Route the order to a shop (stock-aware, priority-ordered) so the
+      // shop's POS pulls it on its next sync tick. All variant lines are
+      // passed so bundles route on every component. Fire-and-forget; the
+      // tick-side sweep re-assigns anything this call misses.
+      assignOrderToShop({
+        ref,
+        lines: lineItems.filter(li => li.variant_id).map(li => ({ variantId: li.variant_id, quantity: li.quantity })),
+        variantId: variantIdInt, quantity: totalQty,
+      }).catch(err => console.error('[order] pos assign error:', err?.message));
+
       // Count this order against the per-phone cap before replying.
       const now = Date.now();
       const entry = phoneOrderStore.get(cleanPhone);
@@ -734,7 +745,13 @@ export default async function handler(req, res) {
         origin:        productTitle || sourceUrl || '',
         shopifyOrderId: order.order_id,
         adType,
-      }).catch(err => console.error('[order] mirror insert error:', err?.message));
+      }).then(() =>
+        assignOrderToShop({
+          ref,
+          lines: lineItems.filter(li => li.variant_id).map(li => ({ variantId: li.variant_id, quantity: li.quantity })),
+          variantId: variantIdInt, quantity: totalQty,
+        })
+      ).catch(err => console.error('[order] mirror insert error:', err?.message));
 
       // Link & convert the matching lead (funnel close) — fallback Shopify path.
       markLeadConverted({

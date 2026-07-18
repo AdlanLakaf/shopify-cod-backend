@@ -21,32 +21,10 @@
 //     swallowed (callers run inside Promise.allSettled / .catch).
 // ============================================================
 
-import pg from 'pg';
+import { getPool } from './_pg.js';
 import { adTypeFromSource } from './_attribution.js';
 
-let pool = null;
 let schemaReady = null;
-
-function getPool() {
-  const url = process.env.DATABASE_URL;
-  if (!url) return null;
-  if (pool) return pool;
-
-  // Mirror _orders-db.js SSL logic: Railway internal = plain TCP, public = SSL.
-  const wantSsl =
-    process.env.DATABASE_SSL === 'true' ||
-    (!/railway\.internal/.test(url) && /\b(sslmode=require|proxy\.rlwy\.net|\.railway\.app)\b/.test(url));
-
-  pool = new pg.Pool({
-    connectionString: url,
-    ssl: wantSsl ? { rejectUnauthorized: false } : undefined,
-    max: 4,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 5_000,
-  });
-  pool.on('error', err => console.error('[leads-db] idle client error:', err.message));
-  return pool;
-}
 
 async function ensureSchema(p) {
   if (schemaReady) return schemaReady;

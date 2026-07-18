@@ -14,32 +14,9 @@
 //  set, every function is a silent no-op.
 // ============================================================
 
-import pg from 'pg';
+import { getPool } from './_pg.js';
 
-let pool = null;
 let schemaReady = null;
-
-function getPool() {
-  const url = process.env.DATABASE_URL;
-  if (!url) return null;
-  if (pool) return pool;
-
-  // Railway's internal network (*.railway.internal) speaks plain TCP; the
-  // public proxy host needs SSL. Allow an explicit override either way.
-  const wantSsl =
-    process.env.DATABASE_SSL === 'true' ||
-    (!/railway\.internal/.test(url) && /\b(sslmode=require|proxy\.rlwy\.net|\.railway\.app)\b/.test(url));
-
-  pool = new pg.Pool({
-    connectionString: url,
-    ssl: wantSsl ? { rejectUnauthorized: false } : undefined,
-    max: 4,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 5_000,
-  });
-  pool.on('error', err => console.error('[orders-db] idle client error:', err.message));
-  return pool;
-}
 
 async function ensureSchema(p) {
   if (schemaReady) return schemaReady;

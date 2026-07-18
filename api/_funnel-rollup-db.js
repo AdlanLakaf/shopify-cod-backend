@@ -22,10 +22,9 @@
 //  Best-effort, never on the order path. No DATABASE_URL → no-op.
 // ============================================================
 
-import pg from 'pg';
+import { getPool } from './_pg.js';
 import { FUNNEL_STEPS } from './_funnel-db.js';
 
-let pool = null;
 let schemaReady = null;
 
 // Only divisors of 24 are allowed: buckets are epoch-aligned to N-hour steps,
@@ -41,21 +40,6 @@ export function rollupHours() {
   return ALLOWED_ROLLUP_HOURS.reduce((best, v) => (Math.abs(v - raw) < Math.abs(best - raw) ? v : best), 1);
 }
 
-function getPool() {
-  const url = process.env.DATABASE_URL;
-  if (!url) return null;
-  if (pool) return pool;
-  const wantSsl =
-    process.env.DATABASE_SSL === 'true' ||
-    (!/railway\.internal/.test(url) && /\b(sslmode=require|proxy\.rlwy\.net|\.railway\.app)\b/.test(url));
-  pool = new pg.Pool({
-    connectionString: url,
-    ssl: wantSsl ? { rejectUnauthorized: false } : undefined,
-    max: 3, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000,
-  });
-  pool.on('error', err => console.error('[funnel-rollup-db] idle client error:', err.message));
-  return pool;
-}
 
 async function ensureSchema(p) {
   if (schemaReady) return schemaReady;

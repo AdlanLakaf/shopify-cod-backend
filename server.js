@@ -19,6 +19,8 @@ import adminFireEventHandler   from './api/admin-fire-event.js';
 import tiktokLeadHandler       from './api/tiktok-lead.js';
 import adminTiktokMapHandler   from './api/admin-tiktok-map.js';
 import adminShopifyVariantsHandler from './api/admin-shopify-variants.js';
+import posSyncHandler          from './api/pos-sync.js';
+import adminPosHandler         from './api/admin-pos.js';
 import { pollTikTokLeads }     from './api/_tiktok.js';
 import { pruneTiktokLeads }    from './api/_tiktok-db.js';
 import { syncPageData }        from './api/sync-page-data.js';
@@ -26,6 +28,7 @@ import { setCorsHeaders }      from './api/_security.js';
 import { pruneLeads }          from './api/_leads-db.js';
 import { pruneSessions }       from './api/_funnel-db.js';
 import { rollupClosedBuckets, pruneRollups, rollupHours } from './api/_funnel-rollup-db.js';
+import { posDailySweep }       from './api/_pos-db.js';
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -39,6 +42,12 @@ app.set('trust proxy', 1);
 // 16kb matches MAX_BODY_BYTES in api/_security.js — a real ad-click order
 // (fbclid/ttclid-laden URLs + bundle display items + Arabic text) runs 4–6 KB,
 // and the old 5kb limit here 413'd those orders before any handler ran.
+// POS sync ticks carry batched stock/sales rows from the shop ERPs and can
+// legitimately exceed the storefront 16kb cap. Mounted BEFORE the global
+// parser: body-parser marks the body consumed, so the 16kb parser below
+// skips these requests instead of 413'ing them. Auth still applies inside
+// the handler (shop sync token).
+app.use('/api/pos', express.json({ limit: '1mb' }));
 app.use(express.json({ limit: '16kb', type: ['application/json', 'text/plain'] }));
 
 // ── Root status page ──────────────────────────────────────────────────────────
@@ -91,6 +100,12 @@ app.all('/api/funnel',             funnelHandler);
 
 // ── TikTok Lead Generation webhook (server-to-server, token in URL) ──────────
 app.all('/api/tiktok/lead', tiktokLeadHandler);
+
+// ── POS sync tick — local shop ERPs push stock/sales, pull web orders ────────
+app.post('/api/pos/tick', posSyncHandler);
+
+// ── Admin: POS shops/brands/mappings/stock/analytics (ADMIN_SECRET bearer) ───
+app.all('/api/admin/pos', adminPosHandler);
 
 // ── Admin: manually fire ad conversion events (ADMIN_SECRET bearer) ──────────
 app.post('/api/admin/fire-event', adminFireEventHandler);
@@ -164,6 +179,14 @@ cron.schedule('0 23 * * *', async () => {
     if (removed) console.log(`[cron] Pruned ${removed} stale TikTok ledger row(s)`);
   } catch (err) {
     console.error('[cron] TikTok prune failed:', err.message);
+  }
+  // POS reconciliation — free reservations from cancelled orders, flag stale
+  // shops / stuck orders / broken mappings in the logs.
+  try {
+    const r = await posDailySweep();
+    if (r) console.log(`[cron] POS sweep:`, JSON.stringify(r));
+  } catch (err) {
+    console.error('[cron] POS sweep failed:', err.message);
   }
 }, { timezone: 'UTC' });
 

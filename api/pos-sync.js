@@ -1,0 +1,71 @@
+// ============================================================
+//  /api/pos/tick — the ONE sync call a local ERP host makes per
+//  interval. Bearer = the shop's sync_token (minted by the admin
+//  when the shop is registered; each shop has its own).
+//
+//  Request body (all sections optional):
+//    stock:        [{ uuid, type, name, brand, category, sellPriceDzd, qty }]
+//    prunedUuids:  [uuid]                    — products deleted locally
+//    sales:        [{ id, status, channel, paymentMethod, totalDzd,
+//                     discountDzd, soldAt, items:[…] }]
+//    orderUpdates: [{ ref, status }]         — 'received' | 'confirmed' | 'cancelled'
+//
+//  Response:
+//    { ok, intervalSec,          — shop's cadence, set from the online admin
+//      orders: [...],            — open web orders assigned to this shop
+//      maxSaleId,                — resume watermark for the sales push
+//      counts: {...} }
+//
+//  Cost design: everything both directions rides this single
+//  request; the ERP never opens a second connection, the cloud
+//  never calls the shop. Batches are capped (500 stock / 200
+//  sales / 100 acks per tick) — the ERP just carries leftovers to
+//  the next tick.
+// ============================================================
+
+import {
+  authShopByToken, applyStockBatch, pruneStock, applySalesBatch,
+  applyOrderUpdates, getOpenOrdersForShop, assignPendingOrders,
+  maxSaleId, touchShopSync,
+} from './_pos-db.js';
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  const shop = await authShopByToken(token);
+  if (!shop) return res.status(401).json({ error: 'Unauthorized' });
+
+  const b = req.body || {};
+  const counts = {};
+  try {
+    // Push-up sections. Order matters: stock first so freshly created
+    // products exist before sales/orders reference them.
+    counts.stock  = await applyStockBatch(shop.id, b.stock);
+    counts.pruned = await pruneStock(shop.id, b.prunedUuids);
+    counts.sales  = await applySalesBatch(shop.id, b.sales);
+    counts.acks   = await applyOrderUpdates(shop.id, b.orderUpdates);
+
+    // Catch any web order the creation-time hook failed to assign, so it
+    // reaches a POS at the latest on the next tick of any shop.
+    counts.assigned = await assignPendingOrders(20);
+
+    const [orders, saleWatermark] = await Promise.all([
+      getOpenOrdersForShop(shop.id),
+      maxSaleId(shop.id),
+    ]);
+    await touchShopSync(shop.id);
+
+    return res.json({
+      ok: true,
+      intervalSec: shop.sync_interval_sec || 300,
+      orders,
+      maxSaleId: saleWatermark,
+      counts,
+    });
+  } catch (err) {
+    console.error('[pos-sync] tick failed:', err.message, `(shop ${shop.id})`);
+    return res.status(500).json({ error: 'Sync failed' });
+  }
+}

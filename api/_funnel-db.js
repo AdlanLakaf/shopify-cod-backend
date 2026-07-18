@@ -12,9 +12,8 @@
 //  Best-effort, never on the order path. No DATABASE_URL → no-op.
 // ============================================================
 
-import pg from 'pg';
+import { getPool } from './_pg.js';
 
-let pool = null;
 let schemaReady = null;
 
 // Ordered main funnel + side engagements. Client mirrors this in lib/funnel.ts.
@@ -26,21 +25,6 @@ export const FUNNEL_STEPS = [
 ];
 const STEP_SET = new Set(FUNNEL_STEPS);
 
-function getPool() {
-  const url = process.env.DATABASE_URL;
-  if (!url) return null;
-  if (pool) return pool;
-  const wantSsl =
-    process.env.DATABASE_SSL === 'true' ||
-    (!/railway\.internal/.test(url) && /\b(sslmode=require|proxy\.rlwy\.net|\.railway\.app)\b/.test(url));
-  pool = new pg.Pool({
-    connectionString: url,
-    ssl: wantSsl ? { rejectUnauthorized: false } : undefined,
-    max: 4, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000,
-  });
-  pool.on('error', err => console.error('[funnel-db] idle client error:', err.message));
-  return pool;
-}
 
 async function ensureSchema(p) {
   if (schemaReady) return schemaReady;
