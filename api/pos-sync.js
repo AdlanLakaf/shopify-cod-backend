@@ -35,7 +35,10 @@ export default async function handler(req, res) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   const shop = await authShopByToken(token);
-  if (!shop) return res.status(401).json({ error: 'Unauthorized' });
+  if (!shop) return res.status(401).json({ error: 'Unknown sync token — re-copy it from /admin/pos (rotate if lost)' });
+  if (!shop.active) {
+    return res.status(403).json({ error: `Shop "${shop.name}" is deactivated in the admin — tick the Active box in /admin/pos to resume sync` });
+  }
 
   const b = req.body || {};
   const counts = {};

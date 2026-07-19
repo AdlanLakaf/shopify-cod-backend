@@ -125,7 +125,11 @@ const OPEN_POS = ['assigned', 'received'];
 
 // ── Shop auth ────────────────────────────────────────────────────────────────
 
-/** Resolve a sync token to its active shop row, or null. */
+/**
+ * Resolve a sync token to its shop row (including inactive ones), or null.
+ * The caller decides how to answer an inactive shop — a distinct 403 beats
+ * a generic 401, which staff can't tell apart from a wrong token.
+ */
 export async function authShopByToken(token) {
   try {
     const p = await db();
@@ -133,7 +137,7 @@ export async function authShopByToken(token) {
     const { rows } = await p.query(
       `SELECT s.*, b.name AS brand_name FROM pos_shops s
         JOIN pos_brands b ON b.id = s.brand_id
-       WHERE s.sync_token = $1 AND s.active`,
+       WHERE s.sync_token = $1`,
       [text(token, 100)]
     );
     return rows[0] || null;
