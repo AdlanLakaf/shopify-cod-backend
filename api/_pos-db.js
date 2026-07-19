@@ -200,6 +200,58 @@ export async function rotateShopToken(shopId) {
   return rows[0] || null;
 }
 
+/**
+ * Disconnect + wipe one shop (e.g. a testing station). Deleting the row kills
+ * its sync token, so the ERP's next tick gets 401 — no cloud-side "kill switch"
+ * needed beyond this. ON DELETE CASCADE wipes pos_products, pos_variant_map
+ * and pos_sales, which removes the shop from stock views and analytics.
+ * Orders are history, not shop data: they are kept but unlinked
+ * (assigned_shop_id=NULL) and any open reservation is released
+ * (pos_status='ignored'), so they remain manageable in /admin/orders and
+ * count only under the "all" analytics scope.
+ */
+export async function deleteShop(shopId) {
+  const p = await db();
+  if (!p) return null;
+  const id = num(shopId);
+  const shop = await p.query(`SELECT id, name FROM pos_shops WHERE id=$1`, [id]);
+  if (!shop.rows.length) return null;
+  const [products, sales, mappings] = await Promise.all([
+    p.query(`SELECT COUNT(*)::int AS n FROM pos_products WHERE shop_id=$1`, [id]),
+    p.query(`SELECT COUNT(*)::int AS n FROM pos_sales WHERE shop_id=$1`, [id]),
+    p.query(`SELECT COUNT(*)::int AS n FROM pos_variant_map WHERE shop_id=$1`, [id]),
+  ]);
+  const freed = await p.query(
+    `UPDATE orders SET pos_status='ignored', updated_at=now()
+      WHERE assigned_shop_id=$1 AND pos_status = ANY($2)`,
+    [id, OPEN_POS]
+  );
+  const unlinked = await p.query(
+    `UPDATE orders SET assigned_shop_id=NULL, updated_at=now() WHERE assigned_shop_id=$1`, [id]
+  );
+  await p.query(`DELETE FROM pos_shops WHERE id=$1`, [id]);
+  const result = {
+    shop: shop.rows[0].name,
+    products: products.rows[0].n, sales: sales.rows[0].n, mappings: mappings.rows[0].n,
+    ordersFreed: freed.rowCount, ordersUnlinked: unlinked.rowCount,
+  };
+  console.log(`[pos-db] deleteShop ${id}:`, JSON.stringify(result));
+  return result;
+}
+
+/** Delete a brand — refused while it still has shops (delete those first). */
+export async function deleteBrand(brandId) {
+  const p = await db();
+  if (!p) return { ok: false, error: 'no database' };
+  const id = num(brandId);
+  const shops = await p.query(`SELECT COUNT(*)::int AS n FROM pos_shops WHERE brand_id=$1`, [id]);
+  if (shops.rows[0].n > 0) {
+    return { ok: false, error: `brand still has ${shops.rows[0].n} shop(s) — delete them first` };
+  }
+  const r = await p.query(`DELETE FROM pos_brands WHERE id=$1`, [id]);
+  return { ok: r.rowCount > 0, error: r.rowCount ? null : 'brand not found' };
+}
+
 /** Brands + shops with sync freshness + mirror row counts (admin overview). */
 export async function listBrandsAndShops() {
   const p = await db();

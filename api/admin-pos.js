@@ -14,6 +14,9 @@
 //        · creating (no id) returns { shop } INCLUDING sync_token —
 //          shown once, paste it into the local ERP's cloud-sync page.
 //    { op:'rotateShopToken', shopId }        → { shop } with new token
+//    { op:'deleteShop', shopId }             → disconnect + wipe stock/sales/
+//                                              mappings; orders kept, unlinked
+//    { op:'deleteBrand', brandId }           → only when brand has no shops
 //    { op:'upsertMapping', shopifyVariantId, shopId, productUuid, qtyPerUnit? }
 //    { op:'deleteMapping', shopifyVariantId, shopId }
 //    { op:'reassignOrder', ref, shopId }
@@ -23,6 +26,7 @@ import {
   listBrandsAndShops, upsertBrand, upsertShop, rotateShopToken,
   upsertVariantMap, deleteVariantMap, listVariantMaps,
   listStock, getAnalytics, reassignOrder, listUnrouted, bulkRoutePending,
+  deleteShop, deleteBrand,
 } from './_pos-db.js';
 
 export default async function handler(req, res) {
@@ -73,6 +77,18 @@ export default async function handler(req, res) {
         // Only expose the token on CREATE (staff must copy it into the ERP).
         if (b.id) delete shop.sync_token;
         return res.json({ ok: true, shop });
+      }
+      case 'deleteShop': {
+        // Disconnect + full wipe: token dies with the row (ERP 401s), stock/
+        // sales/mappings cascade away, orders are kept but unlinked.
+        if (!b.shopId) return res.status(400).json({ error: 'shopId required' });
+        const wiped = await deleteShop(b.shopId);
+        return res.status(wiped ? 200 : 404).json({ ok: !!wiped, wiped });
+      }
+      case 'deleteBrand': {
+        if (!b.brandId) return res.status(400).json({ error: 'brandId required' });
+        const r = await deleteBrand(b.brandId);
+        return res.status(r.ok ? 200 : 400).json(r);
       }
       case 'rotateShopToken': {
         if (!b.shopId) return res.status(400).json({ error: 'shopId required' });
