@@ -10,7 +10,12 @@ import { fetchWithTimeout } from './_security.js';
 const CACHE_TTL = 10 * 60 * 1000;
 let cache = { ts: 0, products: null };
 
-function creds() {
+/** Drop the cached catalog so the next read reflects a write we just made. */
+export function invalidateCatalog() {
+  cache = { ts: 0, products: null };
+}
+
+export function creds() {
   const SHOP  = process.env.SHOPIFY_MYSHOPIFY_DOMAIN || process.env.SHOPIFY_STORE_DOMAIN;
   const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
   return SHOP && TOKEN ? { SHOP, TOKEN } : null;
@@ -41,6 +46,7 @@ export async function listVariants() {
             variantId:    v.id,
             variantTitle: v.title === 'Default Title' ? '' : v.title,
             priceDzd:     Math.round(parseFloat(v.price) || 0),
+            sku:          v.sku || '',   // = local stock uuid for anything we created
           });
         }
       }
