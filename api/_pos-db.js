@@ -108,6 +108,48 @@ async function ensureSchema(p) {
       updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (brand_id, category_id, volume_ml)
     );
+    -- ── Online overlay ─────────────────────────────────────────────────
+    -- The web's OWN name/price/status for one sellable unit, keyed by SKU
+    -- (uuid, or uuid@volume for bulk types). This never touches local
+    -- pricing: a stock row legitimately has two prices, the shop's and the
+    -- web's, and bulk rules here move only the web one. The _overridden
+    -- flags mark a value a human set by hand, so later rules skip it
+    -- unless explicitly told to include overrides.
+    CREATE TABLE IF NOT EXISTS pos_online_products (
+      brand_id           INTEGER NOT NULL REFERENCES pos_brands(id) ON DELETE CASCADE,
+      sku                TEXT NOT NULL,
+      product_uuid       TEXT NOT NULL DEFAULT '',
+      volume_ml          DOUBLE PRECISION,
+      online_name        TEXT NOT NULL DEFAULT '',
+      online_price_dzd   DOUBLE PRECISION,
+      prev_price_dzd     DOUBLE PRECISION,
+      status             TEXT NOT NULL DEFAULT 'draft',
+      price_overridden   BOOLEAN NOT NULL DEFAULT false,
+      name_overridden    BOOLEAN NOT NULL DEFAULT false,
+      shopify_product_id BIGINT,
+      shopify_variant_id BIGINT,
+      published_at       TIMESTAMPTZ,
+      updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (brand_id, sku)
+    );
+    CREATE INDEX IF NOT EXISTS pos_online_uuid_idx ON pos_online_products (brand_id, product_uuid);
+    -- Who changed which price, with which rule. The only thing that can
+    -- answer "why is this priced like that?" three weeks later.
+    CREATE TABLE IF NOT EXISTS pos_price_audit (
+      id         BIGSERIAL PRIMARY KEY,
+      brand_id   INTEGER NOT NULL,
+      sku        TEXT NOT NULL DEFAULT '',
+      old_price  DOUBLE PRECISION,
+      new_price  DOUBLE PRECISION,
+      rule       TEXT NOT NULL DEFAULT '',
+      actor      TEXT NOT NULL DEFAULT '',
+      rows_count INTEGER NOT NULL DEFAULT 1,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS pos_price_audit_idx ON pos_price_audit (brand_id, created_at DESC);
+    -- Decants have no quality tier, so their publishable volumes are a
+    -- per-brand list rather than matrix-derived.
+    ALTER TABLE pos_brands ADD COLUMN IF NOT EXISTS decant_volumes TEXT NOT NULL DEFAULT '5,10,30';
     CREATE TABLE IF NOT EXISTS pos_variant_map (
       shopify_variant_id BIGINT NOT NULL,
       shop_id            INTEGER NOT NULL REFERENCES pos_shops(id) ON DELETE CASCADE,
