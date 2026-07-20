@@ -31,6 +31,11 @@ import {
   listStock, getAnalytics, reassignOrder, listUnrouted, bulkRoutePending,
   deleteShop, deleteBrand, setCatalogSource, getBrandCatalog,
 } from './_pos-db.js';
+import {
+  listOnlineCatalog, updateOnlineProduct, setOnlineStatus,
+  setDecantVolumes, listPriceAudit,
+} from './_online-catalog.js';
+import { loadRuleContext, previewRule, applyRule, revertPrices } from './_pricing-rules.js';
 
 export default async function handler(req, res) {
   const secret = process.env.ADMIN_SECRET;
@@ -55,6 +60,13 @@ export default async function handler(req, res) {
           return res.json({ rows: await listVariantMaps({ shopId: q.shopId || null }) });
         case 'catalog':
           return res.json(await getBrandCatalog(q.brandId));
+        case 'onlineCatalog':
+          return res.json(await listOnlineCatalog(q.brandId, {
+            type: q.type || '', q: q.q || '', status: q.status || '',
+            published: q.published || '', gender: q.gender || '', limit: q.limit || 500,
+          }));
+        case 'priceAudit':
+          return res.json({ rows: await listPriceAudit(q.brandId, q.limit || 50) });
         case 'unrouted':
           return res.json(await listUnrouted());
         case 'analytics':
@@ -93,6 +105,43 @@ export default async function handler(req, res) {
       case 'deleteBrand': {
         if (!b.brandId) return res.status(400).json({ error: 'brandId required' });
         const r = await deleteBrand(b.brandId);
+        return res.status(r.ok ? 200 : 400).json(r);
+      }
+      // ── Online catalog: dual pricing, bulk rules, publish status ──────────
+      case 'updateOnlineProduct': {
+        if (!b.brandId || !b.sku) return res.status(400).json({ error: 'brandId + sku required' });
+        const r = await updateOnlineProduct(b.brandId, b.sku, b);
+        return res.status(r.ok ? 200 : 400).json(r);
+      }
+      case 'setOnlineStatus': {
+        if (!b.brandId || !Array.isArray(b.skus)) return res.status(400).json({ error: 'brandId + skus required' });
+        const r = await setOnlineStatus(b.brandId, b.skus, b.status);
+        return res.status(r.ok ? 200 : 400).json(r);
+      }
+      case 'setDecantVolumes': {
+        if (!b.brandId) return res.status(400).json({ error: 'brandId required' });
+        return res.json(await setDecantVolumes(b.brandId, b.volumes));
+      }
+      case 'previewRule': {
+        // Dry run only — never writes. The UI shows this before asking to apply.
+        if (!b.brandId || !b.rule) return res.status(400).json({ error: 'brandId + rule required' });
+        const { rows } = await listOnlineCatalog(b.brandId, b.filters || {});
+        const subset = Array.isArray(b.skus) && b.skus.length
+          ? rows.filter(r => b.skus.includes(r.sku)) : rows;
+        const ctx = await loadRuleContext(b.brandId);
+        return res.json(previewRule(subset, b.rule, ctx));
+      }
+      case 'applyRule': {
+        if (!b.brandId || !b.rule) return res.status(400).json({ error: 'brandId + rule required' });
+        const { rows } = await listOnlineCatalog(b.brandId, b.filters || {});
+        const subset = Array.isArray(b.skus) && b.skus.length
+          ? rows.filter(r => b.skus.includes(r.sku)) : rows;
+        const r = await applyRule(b.brandId, subset, b.rule, b.actor || 'admin');
+        return res.status(r.ok ? 200 : 500).json(r);
+      }
+      case 'revertPrices': {
+        if (!b.brandId || !Array.isArray(b.skus)) return res.status(400).json({ error: 'brandId + skus required' });
+        const r = await revertPrices(b.brandId, b.skus, b.actor || 'admin');
         return res.status(r.ok ? 200 : 400).json(r);
       }
       case 'setCatalogSource': {

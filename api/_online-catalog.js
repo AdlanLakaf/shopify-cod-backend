@@ -175,3 +175,119 @@ export async function listOnlineCatalog(brandId, filters = {}) {
     decantVolumes,
   };
 }
+
+/**
+ * Edit one online row by hand. Setting a name or price marks it OVERRIDDEN,
+ * which is what makes later bulk rules leave it alone — a human decision
+ * outranks a rule until someone explicitly says otherwise.
+ */
+export async function updateOnlineProduct(brandId, sku, fields = {}) {
+  const p = getPool();
+  if (!p) return { ok: false, error: 'no database' };
+  const bid = num(brandId);
+  const s = String(sku || '').trim();
+  if (!bid || !s) return { ok: false, error: 'brandId and sku are required' };
+
+  const sets = [], params = [bid, s];
+  const add = (col, val) => { params.push(val); sets.push(`${col}=$${params.length}`); };
+
+  if (fields.onlineName !== undefined) {
+    add('online_name', String(fields.onlineName).slice(0, 300));
+    add('name_overridden', String(fields.onlineName).trim() !== '');
+  }
+  if (fields.onlinePriceDzd !== undefined) {
+    const price = fields.onlinePriceDzd === null ? null : num(fields.onlinePriceDzd);
+    sets.push(`prev_price_dzd = pos_online_products.online_price_dzd`);
+    add('online_price_dzd', price);
+    add('price_overridden', price !== null);
+  }
+  if (fields.status !== undefined) add('status', String(fields.status).slice(0, 20));
+  if (fields.priceOverridden !== undefined) add('price_overridden', !!fields.priceOverridden);
+  if (fields.nameOverridden !== undefined) add('name_overridden', !!fields.nameOverridden);
+  if (!sets.length) return { ok: false, error: 'nothing to update' };
+
+  const { uuid, volumeMl } = splitSku(s);
+  try {
+    await p.query(
+      `INSERT INTO pos_online_products (brand_id, sku, product_uuid, volume_ml, updated_at)
+       VALUES ($1,$2,$${params.length + 1},$${params.length + 2}, now())
+       ON CONFLICT (brand_id, sku) DO NOTHING`,
+      [...params, uuid, volumeMl]
+    );
+    await p.query(
+      `UPDATE pos_online_products SET ${sets.join(', ')}, updated_at=now()
+        WHERE brand_id=$1 AND sku=$2`,
+      params
+    );
+    return { ok: true };
+  } catch (err) {
+    console.error('[online-catalog] updateOnlineProduct failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+/** Local split so this module doesn't depend on the Shopify writer for reads. */
+function splitSku(sku) {
+  const at = String(sku).lastIndexOf('@');
+  if (at < 1) return { uuid: sku, volumeMl: null };
+  const v = Number(sku.slice(at + 1));
+  return v > 0 ? { uuid: sku.slice(0, at), volumeMl: v } : { uuid: sku, volumeMl: null };
+}
+
+/** Flip status for many rows at once (publish/hide selections). */
+export async function setOnlineStatus(brandId, skus = [], status = 'active') {
+  const p = getPool();
+  if (!p) return { ok: false, error: 'no database' };
+  if (!Array.isArray(skus) || !skus.length) return { ok: false, error: 'no skus given' };
+  const bid = num(brandId);
+  const st = String(status).slice(0, 20);
+  try {
+    // Rows with no overlay yet must be created, so status can be set on a
+    // product that has never been touched.
+    const values = skus.slice(0, 2000).map((sku, i) => {
+      const { uuid, volumeMl } = splitSku(String(sku));
+      return { sku: String(sku), uuid, volumeMl, i };
+    });
+    const tuples = values.map((v, i) =>
+      `($1, $${i * 3 + 3}, $${i * 3 + 4}, $${i * 3 + 5}, $2, now())`).join(',');
+    const params = [bid, st, ...values.flatMap(v => [v.sku, v.uuid, v.volumeMl])];
+    const r = await p.query(
+      `INSERT INTO pos_online_products (brand_id, sku, product_uuid, volume_ml, status, updated_at)
+       VALUES ${tuples}
+       ON CONFLICT (brand_id, sku) DO UPDATE SET status=EXCLUDED.status, updated_at=now()`,
+      params
+    );
+    return { ok: true, updated: r.rowCount };
+  } catch (err) {
+    console.error('[online-catalog] setOnlineStatus failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+/** The brand's publishable decant volumes (they have no quality tier). */
+export async function setDecantVolumes(brandId, csv) {
+  const p = getPool();
+  if (!p) return { ok: false, error: 'no database' };
+  const clean = String(csv || '').split(',').map(v => num(v)).filter(v => v > 0)
+    .sort((a, b) => a - b).join(',');
+  try {
+    await p.query(`UPDATE pos_brands SET decant_volumes=$2 WHERE id=$1`, [num(brandId), clean]);
+    return { ok: true, decantVolumes: clean };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/** Recent pricing runs, for the audit panel. */
+export async function listPriceAudit(brandId, limit = 50) {
+  const p = getPool();
+  if (!p) return [];
+  try {
+    const { rows } = await p.query(
+      `SELECT id, rule, actor, rows_count, created_at FROM pos_price_audit
+        WHERE brand_id=$1 ORDER BY id DESC LIMIT $2`,
+      [num(brandId), Math.min(num(limit, 50), 200)]
+    );
+    return rows;
+  } catch { return []; }
+}
