@@ -73,6 +73,41 @@ async function ensureSchema(p) {
       updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (shop_id, uuid)
     );
+    -- ── Static catalog (brand-level, NOT per shop) ──────────────────────
+    -- Perfumes, quality tiers and the price matrix describe the brand's
+    -- product knowledge, not one shop's stock. Two shops of the same brand
+    -- would otherwise fight over these rows, so exactly ONE shop per brand
+    -- is flagged is_catalog_source and its push wins.
+    CREATE TABLE IF NOT EXISTS pos_perfumes (
+      brand_id     INTEGER NOT NULL REFERENCES pos_brands(id) ON DELETE CASCADE,
+      local_id     INTEGER NOT NULL,
+      name         TEXT NOT NULL DEFAULT '',
+      brand        TEXT NOT NULL DEFAULT '',
+      gender       TEXT NOT NULL DEFAULT '',
+      category     TEXT NOT NULL DEFAULT '',
+      description  TEXT NOT NULL DEFAULT '',
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (brand_id, local_id)
+    );
+    CREATE TABLE IF NOT EXISTS pos_price_categories (
+      brand_id          INTEGER NOT NULL REFERENCES pos_brands(id) ON DELETE CASCADE,
+      local_id          INTEGER NOT NULL,
+      product_type      TEXT NOT NULL DEFAULT '',
+      name              TEXT NOT NULL DEFAULT '',
+      min_price         DOUBLE PRECISION NOT NULL DEFAULT 0,
+      max_price         DOUBLE PRECISION NOT NULL DEFAULT 0,
+      sell_price_per_kg DOUBLE PRECISION NOT NULL DEFAULT 0,
+      updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (brand_id, local_id)
+    );
+    CREATE TABLE IF NOT EXISTS pos_price_matrix (
+      brand_id    INTEGER NOT NULL REFERENCES pos_brands(id) ON DELETE CASCADE,
+      category_id INTEGER NOT NULL,
+      volume_ml   DOUBLE PRECISION NOT NULL,
+      sell_price  DOUBLE PRECISION NOT NULL DEFAULT 0,
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (brand_id, category_id, volume_ml)
+    );
     CREATE TABLE IF NOT EXISTS pos_variant_map (
       shopify_variant_id BIGINT NOT NULL,
       shop_id            INTEGER NOT NULL REFERENCES pos_shops(id) ON DELETE CASCADE,
@@ -95,6 +130,17 @@ async function ensureSchema(p) {
     );
     CREATE INDEX IF NOT EXISTS pos_sales_sold_idx    ON pos_sales (shop_id, sold_at DESC);
     CREATE INDEX IF NOT EXISTS pos_products_type_idx ON pos_products (shop_id, product_type);
+    -- Stock rows carry what the online pricing rules need: the volume to look
+    -- up in the matrix, the gender to filter on, and the FORCED quality tier
+    -- (the ERP resolves auto → forced before pushing, so this is always final).
+    ALTER TABLE pos_products ADD COLUMN IF NOT EXISTS volume_ml         DOUBLE PRECISION;
+    ALTER TABLE pos_products ADD COLUMN IF NOT EXISTS gender            TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pos_products ADD COLUMN IF NOT EXISTS price_category_id INTEGER;
+    ALTER TABLE pos_products ADD COLUMN IF NOT EXISTS perfume_id        INTEGER;
+    -- Exactly one shop per brand supplies the static catalog above.
+    ALTER TABLE pos_shops ADD COLUMN IF NOT EXISTS is_catalog_source BOOLEAN NOT NULL DEFAULT false;
+    CREATE UNIQUE INDEX IF NOT EXISTS pos_shops_catalog_src_idx
+      ON pos_shops (brand_id) WHERE is_catalog_source;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS variant_id       BIGINT;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS variant_qty      INTEGER NOT NULL DEFAULT 1;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS variant_lines    JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -264,7 +310,7 @@ export async function listBrandsAndShops() {
     p.query(`SELECT * FROM pos_brands ORDER BY id`),
     p.query(
       `SELECT s.id, s.brand_id, s.name, s.logo_url, s.sync_interval_sec, s.routing_priority,
-              s.active, s.last_sync_at, s.created_at,
+              s.active, s.last_sync_at, s.created_at, s.is_catalog_source,
               (SELECT COUNT(*)::int FROM pos_products pp WHERE pp.shop_id = s.id)  AS product_count,
               (SELECT COUNT(*)::int FROM pos_variant_map m WHERE m.shop_id = s.id) AS mapping_count,
               (SELECT COUNT(*)::int FROM orders o
@@ -334,17 +380,23 @@ export async function applyStockBatch(shopId, rows) {
     if (!u) continue;
     const base = params.length;
     params.push(u, text(r?.type, 40), text(r?.name, 300), text(r?.brand, 120),
-      text(r?.category, 120), num(r?.sellPriceDzd), num(r?.qty));
-    vals.push(`($1, $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, now())`);
+      text(r?.category, 120), num(r?.sellPriceDzd), num(r?.qty),
+      r?.volumeMl == null ? null : num(r.volumeMl), text(r?.gender, 20),
+      r?.categoryId == null ? null : num(r.categoryId),
+      r?.perfumeId == null ? null : num(r.perfumeId));
+    vals.push(`($1, $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, now(), $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11})`);
   }
   if (!vals.length) return 0;
   const r = await p.query(
-    `INSERT INTO pos_products (shop_id, uuid, product_type, name, brand, category, sell_price_dzd, stock_qty, updated_at)
+    `INSERT INTO pos_products (shop_id, uuid, product_type, name, brand, category, sell_price_dzd, stock_qty, updated_at,
+                               volume_ml, gender, price_category_id, perfume_id)
      VALUES ${vals.join(',')}
      ON CONFLICT (shop_id, uuid) DO UPDATE SET
        product_type=EXCLUDED.product_type, name=EXCLUDED.name, brand=EXCLUDED.brand,
        category=EXCLUDED.category, sell_price_dzd=EXCLUDED.sell_price_dzd,
-       stock_qty=EXCLUDED.stock_qty, updated_at=now()`,
+       stock_qty=EXCLUDED.stock_qty, updated_at=now(),
+       volume_ml=EXCLUDED.volume_ml, gender=EXCLUDED.gender,
+       price_category_id=EXCLUDED.price_category_id, perfume_id=EXCLUDED.perfume_id`,
     params
   );
   return r.rowCount;
@@ -359,6 +411,135 @@ export async function pruneStock(shopId, uuids) {
     [num(shopId), uuids.slice(0, 500).map(u => text(u, 80))]
   );
   return r.rowCount;
+}
+
+// ── Static catalog: perfumes + quality tiers + price matrix ──────────────────
+
+/** Generic brand-scoped upsert helper for the three catalog tables. */
+async function upsertCatalog(p, table, keyCols, cols, brandId, rows, limit) {
+  if (!Array.isArray(rows) || !rows.length) return 0;
+  const batch = rows.slice(0, limit);
+  const all = [...keyCols, ...cols];
+  const vals = [];
+  const params = [num(brandId)];
+  for (const r of batch) {
+    if (r == null) continue;
+    const base = params.length;
+    params.push(...all.map(c => r[c.k]));
+    vals.push(`($1, ${all.map((_, i) => `$${base + i + 1}`).join(', ')}, now())`);
+  }
+  if (!vals.length) return 0;
+  const names = all.map(c => c.col).join(', ');
+  const setCols = cols.map(c => `${c.col}=EXCLUDED.${c.col}`).join(', ');
+  const conflict = ['brand_id', ...keyCols.map(c => c.col)].join(', ');
+  const r = await p.query(
+    `INSERT INTO ${table} (brand_id, ${names}, updated_at) VALUES ${vals.join(',')}
+     ON CONFLICT (${conflict}) DO UPDATE SET ${setCols}, updated_at=now()`,
+    params
+  );
+  return r.rowCount;
+}
+
+/**
+ * Ingest the brand's static catalog: perfumes (the online perfume database),
+ * price_categories (quality tiers) and price_matrix_cells (tier × volume grid).
+ *
+ * Only the brand's designated catalog-source shop may write these — otherwise
+ * a second shop of the same brand, or a testing station, would silently
+ * overwrite the pricing rules the whole storefront runs on. A non-source shop
+ * pushing catalog data is ignored, not an error: its ERP has no way to know.
+ *
+ * Deletions are deliberately NOT mirrored here. A perfume or tier vanishing
+ * from one sync must never silently unprice live products; stale rows are
+ * cleaned from the admin instead.
+ */
+export async function applyCatalogBatch(shop, body = {}) {
+  const p = await db();
+  if (!p || !shop) return null;
+  if (!shop.is_catalog_source) return null;
+  const brandId = shop.brand_id;
+  const counts = {};
+  try {
+    counts.perfumes = await upsertCatalog(p, 'pos_perfumes',
+      [{ k: 'localId', col: 'local_id' }],
+      [{ k: 'name', col: 'name' }, { k: 'brand', col: 'brand' }, { k: 'gender', col: 'gender' },
+       { k: 'category', col: 'category' }, { k: 'description', col: 'description' }],
+      brandId,
+      (body.perfumes || []).map(r => ({
+        localId: num(r?.localId), name: text(r?.name, 300), brand: text(r?.brand, 120),
+        gender: text(r?.gender, 20), category: text(r?.category, 120), description: text(r?.description, 2000),
+      })).filter(r => r.localId),
+      500);
+
+    counts.priceCategories = await upsertCatalog(p, 'pos_price_categories',
+      [{ k: 'localId', col: 'local_id' }],
+      [{ k: 'productType', col: 'product_type' }, { k: 'name', col: 'name' },
+       { k: 'minPrice', col: 'min_price' }, { k: 'maxPrice', col: 'max_price' },
+       { k: 'sellPricePerKg', col: 'sell_price_per_kg' }],
+      brandId,
+      (body.priceCategories || []).map(r => ({
+        localId: num(r?.localId), productType: text(r?.productType, 40), name: text(r?.name, 120),
+        minPrice: num(r?.minPrice), maxPrice: num(r?.maxPrice), sellPricePerKg: num(r?.sellPricePerKg),
+      })).filter(r => r.localId),
+      200);
+
+    counts.matrixCells = await upsertCatalog(p, 'pos_price_matrix',
+      [{ k: 'categoryId', col: 'category_id' }, { k: 'volumeMl', col: 'volume_ml' }],
+      [{ k: 'sellPrice', col: 'sell_price' }],
+      brandId,
+      (body.matrixCells || []).map(r => ({
+        categoryId: num(r?.categoryId), volumeMl: num(r?.volumeMl), sellPrice: num(r?.sellPrice),
+      })).filter(r => r.categoryId && r.volumeMl > 0),
+      1000);
+
+    return counts;
+  } catch (err) {
+    console.error('[pos-db] applyCatalogBatch failed:', err.message, `(brand ${brandId})`);
+    return null;
+  }
+}
+
+/**
+ * Designate which shop supplies its brand's static catalog. Enforced by a
+ * partial unique index, so promoting a shop must demote its siblings first —
+ * done in one statement pair so the brand is never left with two sources.
+ */
+export async function setCatalogSource(brandId, shopId) {
+  const p = await db();
+  if (!p) return { ok: false, error: 'no database' };
+  const bid = num(brandId), sid = num(shopId);
+  if (!bid || !sid) return { ok: false, error: 'brandId and shopId are required' };
+  try {
+    await p.query(`UPDATE pos_shops SET is_catalog_source=false WHERE brand_id=$1 AND id<>$2`, [bid, sid]);
+    const { rowCount } = await p.query(
+      `UPDATE pos_shops SET is_catalog_source=true WHERE id=$1 AND brand_id=$2`, [sid, bid]);
+    if (!rowCount) return { ok: false, error: 'shop not found in that brand' };
+    console.log(`[pos-db] catalog source for brand ${bid} → shop ${sid}`);
+    return { ok: true };
+  } catch (err) {
+    console.error('[pos-db] setCatalogSource failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+/** The brand's tiers + matrix grid, for the online pricing rules and admin. */
+export async function getBrandCatalog(brandId) {
+  const p = await db();
+  if (!p) return { categories: [], matrix: [], perfumes: 0 };
+  const bid = num(brandId);
+  try {
+    const [cats, cells, perfumes] = await Promise.all([
+      p.query(`SELECT local_id AS id, product_type, name, min_price, max_price, sell_price_per_kg
+                 FROM pos_price_categories WHERE brand_id=$1 ORDER BY product_type, min_price`, [bid]),
+      p.query(`SELECT category_id, volume_ml, sell_price FROM pos_price_matrix
+                WHERE brand_id=$1 ORDER BY category_id, volume_ml`, [bid]),
+      p.query(`SELECT COUNT(*)::int AS n FROM pos_perfumes WHERE brand_id=$1`, [bid]),
+    ]);
+    return { categories: cats.rows, matrix: cells.rows, perfumes: perfumes.rows[0]?.n || 0 };
+  } catch (err) {
+    console.error('[pos-db] getBrandCatalog failed:', err.message);
+    return { categories: [], matrix: [], perfumes: 0 };
+  }
 }
 
 /** Upsert a batch of local sales (idempotent on shop_id + local_sale_id). */

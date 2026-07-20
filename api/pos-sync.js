@@ -4,7 +4,11 @@
 //  when the shop is registered; each shop has its own).
 //
 //  Request body (all sections optional):
-//    stock:        [{ uuid, type, name, brand, category, sellPriceDzd, qty }]
+//    stock:        [{ uuid, type, name, brand, category, sellPriceDzd, qty,
+//                     volumeMl, gender, categoryId, perfumeId }]
+//    catalog:      { perfumes[], priceCategories[], matrixCells[] }
+//                  — brand-level static data; only honoured from the shop
+//                    flagged is_catalog_source for that brand.
 //    prunedUuids:  [uuid]                    — products deleted locally
 //    sales:        [{ id, status, channel, paymentMethod, totalDzd,
 //                     discountDzd, soldAt, items:[…] }]
@@ -26,7 +30,7 @@
 import {
   authShopByToken, applyStockBatch, pruneStock, applySalesBatch,
   applyOrderUpdates, getOpenOrdersForShop, assignPendingOrders,
-  maxSaleId, touchShopSync,
+  maxSaleId, touchShopSync, applyCatalogBatch,
 } from './_pos-db.js';
 
 export default async function handler(req, res) {
@@ -45,6 +49,9 @@ export default async function handler(req, res) {
   try {
     // Push-up sections. Order matters: stock first so freshly created
     // products exist before sales/orders reference them.
+    // Static catalog first — perfumes/tiers/matrix are what stock rows
+    // reference. Ignored unless this shop is its brand's catalog source.
+    counts.catalog = await applyCatalogBatch(shop, b.catalog);
     counts.stock  = await applyStockBatch(shop.id, b.stock);
     counts.pruned = await pruneStock(shop.id, b.prunedUuids);
     counts.sales  = await applySalesBatch(shop.id, b.sales);

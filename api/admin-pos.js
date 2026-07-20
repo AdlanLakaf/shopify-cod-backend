@@ -20,13 +20,16 @@
 //    { op:'upsertMapping', shopifyVariantId, shopId, productUuid, qtyPerUnit? }
 //    { op:'deleteMapping', shopifyVariantId, shopId }
 //    { op:'reassignOrder', ref, shopId }
+//    { op:'setCatalogSource', brandId, shopId } → which shop supplies the
+//                                              brand's perfumes + price matrix
+//  GET  ?view=catalog&brandId=              → { categories, matrix, perfumes }
 // ============================================================
 
 import {
   listBrandsAndShops, upsertBrand, upsertShop, rotateShopToken,
   upsertVariantMap, deleteVariantMap, listVariantMaps,
   listStock, getAnalytics, reassignOrder, listUnrouted, bulkRoutePending,
-  deleteShop, deleteBrand,
+  deleteShop, deleteBrand, setCatalogSource, getBrandCatalog,
 } from './_pos-db.js';
 
 export default async function handler(req, res) {
@@ -50,6 +53,8 @@ export default async function handler(req, res) {
           });
         case 'mappings':
           return res.json({ rows: await listVariantMaps({ shopId: q.shopId || null }) });
+        case 'catalog':
+          return res.json(await getBrandCatalog(q.brandId));
         case 'unrouted':
           return res.json(await listUnrouted());
         case 'analytics':
@@ -88,6 +93,11 @@ export default async function handler(req, res) {
       case 'deleteBrand': {
         if (!b.brandId) return res.status(400).json({ error: 'brandId required' });
         const r = await deleteBrand(b.brandId);
+        return res.status(r.ok ? 200 : 400).json(r);
+      }
+      case 'setCatalogSource': {
+        if (!b.brandId || !b.shopId) return res.status(400).json({ error: 'brandId + shopId required' });
+        const r = await setCatalogSource(b.brandId, b.shopId);
         return res.status(r.ok ? 200 : 400).json(r);
       }
       case 'rotateShopToken': {
