@@ -94,11 +94,39 @@ function describeErrors(data) {
 
 const money = dzd => (Math.round(Number(dzd) || 0)).toFixed(2);
 
+/**
+ * Build a variant's SKU from local identity.
+ *
+ * Only `original` is a discrete unit — one uuid, one bottle, SKU = uuid.
+ * Decants, extrait and shop-made are BULK pools measured in millilitres
+ * whose sellable volumes come from the price matrix, so one uuid backs many
+ * online variants and the volume must ride in the SKU:  uuid@30
+ *
+ * Resolution is then a split: the left half finds the local pool, the right
+ * half tells the POS how much to draw from it.
+ */
+export function makeSku(uuid, volumeMl) {
+  const u = String(uuid || '').trim();
+  if (!u) return '';
+  const v = Number(volumeMl);
+  return v > 0 ? `${u}@${v}` : u;
+}
+
+/** Inverse of makeSku: 'abc@30' → { uuid:'abc', volumeMl:30 }. */
+export function parseSku(sku) {
+  const s = String(sku || '').trim();
+  if (!s) return null;
+  const at = s.lastIndexOf('@');
+  if (at < 1) return { uuid: s, volumeMl: null };
+  const v = Number(s.slice(at + 1));
+  return v > 0 ? { uuid: s.slice(0, at), volumeMl: v } : { uuid: s, volumeMl: null };
+}
+
 /** Shape one of our variant descriptors into Shopify's variant payload. */
 function variantPayload(v, { track = false } = {}) {
   const p = {
     price: money(v.priceDzd),
-    sku: String(v.uuid || v.sku || ''),        // rule 1: SKU carries local identity
+    sku: v.sku ? String(v.sku) : makeSku(v.uuid, v.volumeMl),  // rule 1: SKU carries local identity
     inventory_management: track ? 'shopify' : null,
     inventory_policy: 'continue',              // rule 2: never refuse an order
     taxable: false,
@@ -225,7 +253,7 @@ export async function updateVariant(variantId, fields = {}) {
   const variant = { id };
   if (fields.priceDzd     !== undefined) variant.price             = money(fields.priceDzd);
   if (fields.compareAtDzd !== undefined) variant.compare_at_price  = fields.compareAtDzd ? money(fields.compareAtDzd) : null;
-  if (fields.uuid         !== undefined) variant.sku               = String(fields.uuid);
+  if (fields.uuid         !== undefined) variant.sku               = makeSku(fields.uuid, fields.volumeMl);
   if (fields.sku          !== undefined) variant.sku               = String(fields.sku);
   if (fields.title        !== undefined) variant.option1           = String(fields.title);
   if (fields.barcode      !== undefined) variant.barcode           = String(fields.barcode);
@@ -258,7 +286,8 @@ export async function deleteVariant(productId, variantId) {
  * healing operation: staff resolve one unmapped variant by hand, and the
  * link becomes permanent and shop-independent instead of a map row.
  */
-export const setVariantSku = (variantId, uuid) => updateVariant(variantId, { sku: uuid });
+export const setVariantSku = (variantId, uuid, volumeMl = null) =>
+  updateVariant(variantId, { sku: makeSku(uuid, volumeMl) });
 
 // ── Bulk ────────────────────────────────────────────────────
 
