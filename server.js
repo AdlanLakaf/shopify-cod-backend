@@ -20,6 +20,7 @@ import tiktokLeadHandler       from './api/tiktok-lead.js';
 import adminTiktokMapHandler   from './api/admin-tiktok-map.js';
 import adminShopifyVariantsHandler from './api/admin-shopify-variants.js';
 import posSyncHandler          from './api/pos-sync.js';
+import posImageHandler         from './api/pos-image.js';
 import adminPosHandler         from './api/admin-pos.js';
 import { pollTikTokLeads }     from './api/_tiktok.js';
 import { pruneTiktokLeads }    from './api/_tiktok-db.js';
@@ -47,7 +48,11 @@ app.set('trust proxy', 1);
 // parser: body-parser marks the body consumed, so the 16kb parser below
 // skips these requests instead of 413'ing them. Auth still applies inside
 // the handler (shop sync token).
-app.use('/api/pos', express.json({ limit: '1mb' }));
+// Image uploads carry base64 photo bytes — a much larger limit, on their own
+// route. Mounted BEFORE /api/pos so this parser wins for /api/pos/image
+// (express prefix-matches, and body-parser consumes on first match).
+app.use('/api/pos/image', express.json({ limit: '12mb' }));
+app.use('/api/pos', express.json({ limit: '2mb' }));
 app.use(express.json({ limit: '16kb', type: ['application/json', 'text/plain'] }));
 
 // ── Root status page ──────────────────────────────────────────────────────────
@@ -103,6 +108,7 @@ app.all('/api/tiktok/lead', tiktokLeadHandler);
 
 // ── POS sync tick — local shop ERPs push stock/sales, pull web orders ────────
 app.post('/api/pos/tick', posSyncHandler);
+app.post('/api/pos/image', posImageHandler);
 
 // ── Admin: POS shops/brands/mappings/stock/analytics (ADMIN_SECRET bearer) ───
 app.all('/api/admin/pos', adminPosHandler);

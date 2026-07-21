@@ -8,7 +8,8 @@
 //                     volumeMl, gender, categoryId, perfumeId }]
 //    catalog:      { perfumes[], priceCategories[], matrixCells[] }
 //                  — brand-level static data; only honoured from the shop
-//                    flagged is_catalog_source for that brand.
+//                    flagged is_catalog_source for that brand. Photo BYTES do
+//                    NOT ride here — they go to /api/pos/image (too large).
 //    prunedUuids:  [uuid]                    — products deleted locally
 //    sales:        [{ id, status, channel, paymentMethod, totalDzd,
 //                     discountDzd, soldAt, items:[…] }]

@@ -514,37 +514,48 @@ async function upsertCatalog(p, table, keyCols, cols, brandId, rows, limit) {
 }
 
 /**
- * Upload any never-seen photo to Shopify's CDN, record file→url, then point
- * each perfume's image_url at its first photo's url. Returns the count linked.
- * Dedup by (brand, filename): a photo already uploaded is skipped, so this is
- * near-free after the first sync.
+ * Upload ONE perfume photo, from the dedicated image endpoint. Kept off the
+ * JSON tick because base64 image bytes are large and were blowing the tick's
+ * body limit (413). Only the brand's catalog-source shop may push images.
+ * Returns { ok, file, url, skipped? }.
  */
-async function ingestImages(p, brandId, images) {
-  if (!Array.isArray(images) || !images.length) return { count: 0, files: [] };
-  const confirmed = [];   // filenames now hosted (this call OR already) — the ERP stops resending these
-  for (const img of images.slice(0, 40)) {   // cap per tick; leftovers ride the next
-    const file = text(img?.file, 200);
-    if (!file || !img?.dataB64) continue;
+export async function applyOneImage(shop, image) {
+  const p = await db();
+  if (!p || !shop) return { ok: false, error: 'no database' };
+  if (!shop.is_catalog_source) return { ok: false, error: 'not the catalog source' };
+  const file = text(image?.file, 200);
+  if (!file || !image?.dataB64) return { ok: false, error: 'file and dataB64 required' };
+  const brandId = shop.brand_id;
+  try {
     const seen = await p.query(
-      `SELECT 1 FROM pos_perfume_images WHERE brand_id=$1 AND local_file=$2 AND shopify_url<>''`,
+      `SELECT shopify_url FROM pos_perfume_images WHERE brand_id=$1 AND local_file=$2 AND shopify_url<>''`,
       [num(brandId), file]);
-    if (seen.rowCount) { confirmed.push(file); continue; }
-    const url = await uploadImage(img.dataB64, file, text(img?.mime, 40) || 'image/png');
-    if (!url) continue;   // upload failed — leave unconfirmed so the ERP retries
+    if (seen.rowCount) {   // already hosted — confirm without re-uploading
+      await linkPerfumeImages(p, brandId);
+      return { ok: true, file, url: seen.rows[0].shopify_url, skipped: 'already hosted' };
+    }
+    const url = await uploadImage(image.dataB64, file, text(image?.mime, 40) || 'image/png');
+    if (!url) return { ok: false, file, error: 'upload failed' };
     await p.query(
       `INSERT INTO pos_perfume_images (brand_id, local_file, shopify_url) VALUES ($1,$2,$3)
        ON CONFLICT (brand_id, local_file) DO UPDATE SET shopify_url=EXCLUDED.shopify_url`,
       [num(brandId), file, url]);
-    confirmed.push(file);
+    await linkPerfumeImages(p, brandId);
+    return { ok: true, file, url };
+  } catch (err) {
+    console.error('[pos-db] applyOneImage failed:', err.message);
+    return { ok: false, file, error: err.message };
   }
-  // Link first photo → its CDN url for every perfume that now has one.
+}
+
+/** Point each perfume's image_url at its first photo's hosted CDN url. */
+async function linkPerfumeImages(p, brandId) {
   await p.query(
     `UPDATE pos_perfumes pp SET image_url = i.shopify_url, updated_at=now()
        FROM pos_perfume_images i
       WHERE pp.brand_id=$1 AND i.brand_id=$1
         AND i.local_file = (pp.photos->>0) AND pp.image_url <> i.shopify_url`,
     [num(brandId)]);
-  return { count: confirmed.length, files: confirmed };
 }
 
 /**
@@ -590,11 +601,9 @@ export async function applyCatalogBatch(shop, body = {}) {
       })).filter(r => r.localId),
       500);
 
-    // Thumbnails: upload only photos we have never seen, then link each
-    // perfume's first photo to its CDN url. Runs rarely (photos change little).
-    const img = await ingestImages(p, brandId, body.images);
-    counts.imaged = img.count;
-    counts.imagedFiles = img.files;   // the ERP marks these confirmed, stops resending
+    // Images no longer ride the tick — they go to /api/pos/image (base64 bytes
+    // were blowing the tick body limit). Re-link in case photos changed names.
+    await linkPerfumeImages(p, brandId);
 
     counts.priceCategories = await upsertCatalog(p, 'pos_price_categories',
       [{ k: 'localId', col: 'local_id' }],
