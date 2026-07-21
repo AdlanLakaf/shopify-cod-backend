@@ -520,22 +520,22 @@ async function upsertCatalog(p, table, keyCols, cols, brandId, rows, limit) {
  * near-free after the first sync.
  */
 async function ingestImages(p, brandId, images) {
-  if (!Array.isArray(images) || !images.length) return 0;
-  let uploaded = 0;
+  if (!Array.isArray(images) || !images.length) return { count: 0, files: [] };
+  const confirmed = [];   // filenames now hosted (this call OR already) — the ERP stops resending these
   for (const img of images.slice(0, 40)) {   // cap per tick; leftovers ride the next
     const file = text(img?.file, 200);
     if (!file || !img?.dataB64) continue;
     const seen = await p.query(
       `SELECT 1 FROM pos_perfume_images WHERE brand_id=$1 AND local_file=$2 AND shopify_url<>''`,
       [num(brandId), file]);
-    if (seen.rowCount) continue;
+    if (seen.rowCount) { confirmed.push(file); continue; }
     const url = await uploadImage(img.dataB64, file, text(img?.mime, 40) || 'image/png');
-    if (!url) continue;
+    if (!url) continue;   // upload failed — leave unconfirmed so the ERP retries
     await p.query(
       `INSERT INTO pos_perfume_images (brand_id, local_file, shopify_url) VALUES ($1,$2,$3)
        ON CONFLICT (brand_id, local_file) DO UPDATE SET shopify_url=EXCLUDED.shopify_url`,
       [num(brandId), file, url]);
-    uploaded++;
+    confirmed.push(file);
   }
   // Link first photo → its CDN url for every perfume that now has one.
   await p.query(
@@ -544,7 +544,7 @@ async function ingestImages(p, brandId, images) {
       WHERE pp.brand_id=$1 AND i.brand_id=$1
         AND i.local_file = (pp.photos->>0) AND pp.image_url <> i.shopify_url`,
     [num(brandId)]);
-  return uploaded;
+  return { count: confirmed.length, files: confirmed };
 }
 
 /**
@@ -592,7 +592,9 @@ export async function applyCatalogBatch(shop, body = {}) {
 
     // Thumbnails: upload only photos we have never seen, then link each
     // perfume's first photo to its CDN url. Runs rarely (photos change little).
-    counts.imaged = await ingestImages(p, brandId, body.images);
+    const img = await ingestImages(p, brandId, body.images);
+    counts.imaged = img.count;
+    counts.imagedFiles = img.files;   // the ERP marks these confirmed, stops resending
 
     counts.priceCategories = await upsertCatalog(p, 'pos_price_categories',
       [{ k: 'localId', col: 'local_id' }],
