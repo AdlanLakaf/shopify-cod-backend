@@ -35,6 +35,7 @@
 
 import crypto from 'crypto';
 import { getPool } from './_pg.js';
+import { uploadImage } from './_shopify-files.js';
 
 let schemaReady = null;
 
@@ -78,16 +79,40 @@ async function ensureSchema(p) {
     -- product knowledge, not one shop's stock. Two shops of the same brand
     -- would otherwise fight over these rows, so exactly ONE shop per brand
     -- is flagged is_catalog_source and its push wins.
+    -- The full perfume record — this online system is the PARENT API for
+    -- perfume data, so every field the local ERP holds is mirrored, not a
+    -- subset. Structured fields (notes/seasons/weather/accords/photos) stay
+    -- JSONB for full fidelity and future querying. image_url is the Shopify
+    -- CDN thumbnail; photos keeps the local filenames as the upload keys.
     CREATE TABLE IF NOT EXISTS pos_perfumes (
-      brand_id     INTEGER NOT NULL REFERENCES pos_brands(id) ON DELETE CASCADE,
-      local_id     INTEGER NOT NULL,
-      name         TEXT NOT NULL DEFAULT '',
-      brand        TEXT NOT NULL DEFAULT '',
-      gender       TEXT NOT NULL DEFAULT '',
-      category     TEXT NOT NULL DEFAULT '',
-      description  TEXT NOT NULL DEFAULT '',
-      updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      brand_id        INTEGER NOT NULL REFERENCES pos_brands(id) ON DELETE CASCADE,
+      local_id        INTEGER NOT NULL,
+      name            TEXT NOT NULL DEFAULT '',
+      brand           TEXT NOT NULL DEFAULT '',
+      category        TEXT NOT NULL DEFAULT '',
+      original_bottle TEXT NOT NULL DEFAULT '',
+      gender          TEXT NOT NULL DEFAULT '',
+      description     TEXT NOT NULL DEFAULT '',
+      rating          DOUBLE PRECISION,
+      accords         JSONB NOT NULL DEFAULT '[]'::jsonb,
+      notes           JSONB NOT NULL DEFAULT '{}'::jsonb,
+      seasons         JSONB NOT NULL DEFAULT '{}'::jsonb,
+      weather         JSONB NOT NULL DEFAULT '{}'::jsonb,
+      remember_me     JSONB NOT NULL DEFAULT '[]'::jsonb,
+      photos          JSONB NOT NULL DEFAULT '[]'::jsonb,
+      image_url       TEXT NOT NULL DEFAULT '',
+      local_uuid      TEXT NOT NULL DEFAULT '',
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (brand_id, local_id)
+    );
+    -- One CDN upload per source photo, ever. Keyed by the local filename so a
+    -- photo already on Shopify is never re-uploaded on later syncs.
+    CREATE TABLE IF NOT EXISTS pos_perfume_images (
+      brand_id      INTEGER NOT NULL REFERENCES pos_brands(id) ON DELETE CASCADE,
+      local_file    TEXT NOT NULL,
+      shopify_url   TEXT NOT NULL DEFAULT '',
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (brand_id, local_file)
     );
     CREATE TABLE IF NOT EXISTS pos_price_categories (
       brand_id          INTEGER NOT NULL REFERENCES pos_brands(id) ON DELETE CASCADE,
@@ -207,6 +232,12 @@ async function db() {
 
 const num  = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const text = (v, max = 200) => String(v ?? '').trim().slice(0, max);
+/** Normalize any value to a JSON string for a jsonb param, or a fallback. */
+const jsonText = (v, fallback) => {
+  if (v == null) return fallback;
+  if (typeof v === 'string') { try { JSON.parse(v); return v; } catch { return fallback; } }
+  try { return JSON.stringify(v); } catch { return fallback; }
+};
 
 // Open pos_status values that hold a stock reservation.
 const OPEN_POS = ['assigned', 'received'];
@@ -483,6 +514,40 @@ async function upsertCatalog(p, table, keyCols, cols, brandId, rows, limit) {
 }
 
 /**
+ * Upload any never-seen photo to Shopify's CDN, record file→url, then point
+ * each perfume's image_url at its first photo's url. Returns the count linked.
+ * Dedup by (brand, filename): a photo already uploaded is skipped, so this is
+ * near-free after the first sync.
+ */
+async function ingestImages(p, brandId, images) {
+  if (!Array.isArray(images) || !images.length) return 0;
+  let uploaded = 0;
+  for (const img of images.slice(0, 40)) {   // cap per tick; leftovers ride the next
+    const file = text(img?.file, 200);
+    if (!file || !img?.dataB64) continue;
+    const seen = await p.query(
+      `SELECT 1 FROM pos_perfume_images WHERE brand_id=$1 AND local_file=$2 AND shopify_url<>''`,
+      [num(brandId), file]);
+    if (seen.rowCount) continue;
+    const url = await uploadImage(img.dataB64, file, text(img?.mime, 40) || 'image/png');
+    if (!url) continue;
+    await p.query(
+      `INSERT INTO pos_perfume_images (brand_id, local_file, shopify_url) VALUES ($1,$2,$3)
+       ON CONFLICT (brand_id, local_file) DO UPDATE SET shopify_url=EXCLUDED.shopify_url`,
+      [num(brandId), file, url]);
+    uploaded++;
+  }
+  // Link first photo → its CDN url for every perfume that now has one.
+  await p.query(
+    `UPDATE pos_perfumes pp SET image_url = i.shopify_url, updated_at=now()
+       FROM pos_perfume_images i
+      WHERE pp.brand_id=$1 AND i.brand_id=$1
+        AND i.local_file = (pp.photos->>0) AND pp.image_url <> i.shopify_url`,
+    [num(brandId)]);
+  return uploaded;
+}
+
+/**
  * Ingest the brand's static catalog: perfumes (the online perfume database),
  * price_categories (quality tiers) and price_matrix_cells (tier × volume grid).
  *
@@ -502,16 +567,32 @@ export async function applyCatalogBatch(shop, body = {}) {
   const brandId = shop.brand_id;
   const counts = {};
   try {
+    // Full perfume record — the parent API mirrors every field, structured
+    // ones as JSONB. jsonb params are passed as JSON strings.
     counts.perfumes = await upsertCatalog(p, 'pos_perfumes',
       [{ k: 'localId', col: 'local_id' }],
       [{ k: 'name', col: 'name' }, { k: 'brand', col: 'brand' }, { k: 'gender', col: 'gender' },
-       { k: 'category', col: 'category' }, { k: 'description', col: 'description' }],
+       { k: 'category', col: 'category' }, { k: 'originalBottle', col: 'original_bottle' },
+       { k: 'description', col: 'description' }, { k: 'rating', col: 'rating' },
+       { k: 'accords', col: 'accords' }, { k: 'notes', col: 'notes' }, { k: 'seasons', col: 'seasons' },
+       { k: 'weather', col: 'weather' }, { k: 'rememberMe', col: 'remember_me' },
+       { k: 'photos', col: 'photos' }, { k: 'localUuid', col: 'local_uuid' }],
       brandId,
       (body.perfumes || []).map(r => ({
         localId: num(r?.localId), name: text(r?.name, 300), brand: text(r?.brand, 120),
-        gender: text(r?.gender, 20), category: text(r?.category, 120), description: text(r?.description, 2000),
+        gender: text(r?.gender, 20), category: text(r?.category, 120),
+        originalBottle: text(r?.originalBottle, 200), description: text(r?.description, 4000),
+        rating: r?.rating == null ? null : num(r.rating),
+        accords: jsonText(r?.accords, '[]'), notes: jsonText(r?.notes, '{}'),
+        seasons: jsonText(r?.seasons, '{}'), weather: jsonText(r?.weather, '{}'),
+        rememberMe: jsonText(r?.rememberMe, '[]'), photos: jsonText(r?.photos, '[]'),
+        localUuid: text(r?.localUuid, 80),
       })).filter(r => r.localId),
       500);
+
+    // Thumbnails: upload only photos we have never seen, then link each
+    // perfume's first photo to its CDN url. Runs rarely (photos change little).
+    counts.imaged = await ingestImages(p, brandId, body.images);
 
     counts.priceCategories = await upsertCatalog(p, 'pos_price_categories',
       [{ k: 'localId', col: 'local_id' }],

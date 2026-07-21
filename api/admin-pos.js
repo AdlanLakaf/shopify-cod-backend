@@ -32,7 +32,7 @@ import {
   deleteShop, deleteBrand, setCatalogSource, getBrandCatalog,
 } from './_pos-db.js';
 import {
-  listOnlineCatalog, updateOnlineProduct, setOnlineStatus,
+  listOnlineCatalog, getProductDetail, updateOnlineProduct, setOnlineStatus,
   setDecantVolumes, listPriceAudit,
 } from './_online-catalog.js';
 import { loadRuleContext, previewRule, applyRule, revertPrices } from './_pricing-rules.js';
@@ -65,6 +65,8 @@ export default async function handler(req, res) {
             type: q.type || '', q: q.q || '', status: q.status || '',
             published: q.published || '', gender: q.gender || '', limit: q.limit || 500,
           }));
+        case 'productDetail':
+          return res.json(await getProductDetail(q.brandId, q.uuid) || {});
         case 'priceAudit':
           return res.json({ rows: await listPriceAudit(q.brandId, q.limit || 50) });
         case 'unrouted':

@@ -1,162 +1,104 @@
 // ============================================================
 //  Online catalog — the brand's web-facing product list.
 //
-//  This is where the two prices live side by side. A local stock
-//  row has ONE local price (what the shop sells it for) and the
-//  web has its own (delivery, ads, different margin). Nothing in
-//  this file ever writes a local price; the overlay
-//  (pos_online_products) is a separate layer keyed by SKU.
+//  ONE ROW PER LOCAL PRODUCT (uuid), mirroring the ERP stock page
+//  1:1 — originals, extrait, decants, shop-made, exactly as they
+//  exist locally. NO volume expansion: a decant is one row (its
+//  10ml base), not three; volume-level pricing is derived later at
+//  sale / publish time, not stored as separate rows. This is what
+//  keeps the list correct (extrait/shopMade are no longer hostage
+//  to a synced matrix) and cheap (few rows, one query).
 //
-//  Expansion: local stock is not the same shape as the web's.
-//    original            → 1 sellable unit  (SKU uuid)
-//    extrait / shopMade  → one per matrix volume of its tier
-//    decant              → one per the brand's decant volume list
-//  …because only originals are discrete bottles; the rest are bulk
-//  pools measured in millilitres.
+//  Two prices side by side. The local price is the shop's, mirrored
+//  read-only; the online price is the web overlay (pos_online_products,
+//  keyed by uuid). Nothing here writes a local price.
 //
-//  Local price per volume, by type:
-//    original   → the row's own sell price
-//    extrait /  → the matrix cell (tier × volume). No cell = the
-//    shopMade     grid is sparse: reported, never guessed.
-//    decant     → sell_price is per 10ml, so /10 × volume
+//  Core data comes from pos_perfumes (the parent perfume record) via
+//  perfume_id — gender, description, accords, notes, image, etc.
 //
-//  Stock is summed across the brand's shops (the web sells the
-//  brand, not one counter); per-shop routing stays where it was.
+//  Stock is summed across the brand's shops; the representative local
+//  price is the catalog-source shop's, falling back to the max.
 // ============================================================
 
 import { getPool } from './_pg.js';
-import { makeSku } from './_shopify-write.js';
 
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
-
-/** Bulk types are pools; only `original` is a discrete unit. */
-const isBulk = type => type === 'extrait' || type === 'shopMade' || type === 'decant';
-
-/**
- * Local price for one sellable unit. Returns { price, issue } — `issue`
- * carries WHY a price is unknown so the admin can show the row greyed with
- * a reason instead of silently pricing it at zero.
- */
-export function localPriceFor(row, volumeMl, matrixByCell) {
-  if (row.product_type === 'original') return { price: num(row.sell_price_dzd), issue: '' };
-
-  if (row.product_type === 'decant') {
-    // Stored per 10ml.
-    const perMl = num(row.sell_price_dzd) / 10;
-    if (!perMl) return { price: 0, issue: 'no local decant price' };
-    return { price: Math.round(perMl * volumeMl), issue: '' };
-  }
-
-  // extrait / shopMade → the tier × volume matrix cell.
-  if (!row.price_category_id) return { price: 0, issue: 'no quality tier set' };
-  const cell = matrixByCell.get(`${row.price_category_id}|${volumeMl}`);
-  if (cell == null) return { price: 0, issue: `no matrix cell for ${volumeMl}ml in tier ${row.price_category_id}` };
-  return { price: Math.round(cell), issue: '' };
-}
+const parseJson = (v, d) => {
+  if (v == null) return d;
+  if (typeof v === 'object') return v;
+  try { return JSON.parse(v); } catch { return d; }
+};
 
 /**
- * The volumes one stock row can be sold in online.
- * Bulk rows get the candidate list; originals get their own single volume.
- */
-function volumesFor(row, matrixVolumesByTier, decantVolumes) {
-  if (row.product_type === 'original') return [row.volume_ml == null ? null : num(row.volume_ml)];
-  if (row.product_type === 'decant') return decantVolumes;
-  return matrixVolumesByTier.get(row.price_category_id) || [];
-}
-
-/**
- * Full online catalog for a brand: every sellable unit, with BOTH prices,
- * the overlay's name/status, and its Shopify link if published.
+ * The brand catalog: one row per local product, both prices, the online
+ * overlay, and the joined perfume core data.
  *
  * filters: { type, q, status, published: 'yes'|'no'|'', gender, limit }
  */
 export async function listOnlineCatalog(brandId, filters = {}) {
   const p = getPool();
-  if (!p) return { rows: [], issues: [] };
+  if (!p) return { rows: [], total: 0 };
   const bid = num(brandId);
-  if (!bid) return { rows: [], issues: [] };
+  if (!bid) return { rows: [], total: 0 };
 
-  const limit = Math.min(Math.max(num(filters.limit, 500), 1), 2000);
+  const limit = Math.min(Math.max(num(filters.limit, 800), 1), 3000);
 
-  const [stockRes, catRes, matrixRes, overlayRes, brandRes] = await Promise.all([
-    // One row per uuid for the whole brand: stock summed across its shops,
-    // descriptive fields taken from any shop (they come from the same
-    // perfume record, so they agree).
-    p.query(
-      `SELECT pp.uuid, MAX(pp.product_type) AS product_type, MAX(pp.name) AS name,
-              MAX(pp.brand) AS brand, MAX(pp.category) AS category, MAX(pp.gender) AS gender,
-              MAX(pp.volume_ml) AS volume_ml, MAX(pp.price_category_id) AS price_category_id,
-              MAX(pp.perfume_id) AS perfume_id,
-              MAX(pp.sell_price_dzd) AS sell_price_dzd,
-              SUM(pp.stock_qty) AS stock_qty,
-              COUNT(*)::int AS shop_count
-         FROM pos_products pp
-         JOIN pos_shops s ON s.id = pp.shop_id
-        WHERE s.brand_id = $1
-        GROUP BY pp.uuid`,
-      [bid]
-    ),
-    p.query(`SELECT local_id, name, product_type FROM pos_price_categories WHERE brand_id=$1`, [bid]),
-    p.query(`SELECT category_id, volume_ml, sell_price FROM pos_price_matrix WHERE brand_id=$1`, [bid]),
-    p.query(`SELECT * FROM pos_online_products WHERE brand_id=$1`, [bid]),
-    p.query(`SELECT decant_volumes FROM pos_brands WHERE id=$1`, [bid]),
-  ]);
+  // One grouped query does the whole list: stock summed across the brand's
+  // shops, the catalog-source shop's price kept as canonical, and the perfume
+  // core data + Shopify thumbnail joined in. No per-row follow-up reads.
+  const { rows: raw } = await p.query(
+    `SELECT pp.uuid,
+            MAX(pp.product_type)                                       AS product_type,
+            MAX(pp.name)                                              AS name,
+            MAX(pp.perfume_id)                                        AS perfume_id,
+            SUM(pp.stock_qty)                                         AS stock_qty,
+            COUNT(*)::int                                             AS shop_count,
+            MAX(pp.sell_price_dzd)                                    AS any_price,
+            MAX(pp.sell_price_dzd) FILTER (WHERE s.is_catalog_source) AS source_price,
+            COALESCE(MAX(pf.name), MAX(pp.name))                      AS perfume_name,
+            MAX(pf.brand)       AS brand,      MAX(pf.category) AS category,
+            MAX(pf.gender)      AS gender,     MAX(pf.image_url) AS image_url,
+            MAX(pf.description) AS description,
+            o.online_name, o.online_price_dzd, o.prev_price_dzd, o.status,
+            o.price_overridden, o.name_overridden, o.shopify_product_id, o.shopify_variant_id
+       FROM pos_products pp
+       JOIN pos_shops s        ON s.id = pp.shop_id
+       LEFT JOIN pos_perfumes pf       ON pf.brand_id = s.brand_id AND pf.local_id = pp.perfume_id
+       LEFT JOIN pos_online_products o ON o.brand_id  = s.brand_id AND o.sku       = pp.uuid
+      WHERE s.brand_id = $1
+      GROUP BY pp.uuid, o.online_name, o.online_price_dzd, o.prev_price_dzd, o.status,
+               o.price_overridden, o.name_overridden, o.shopify_product_id, o.shopify_variant_id`,
+    [bid]
+  );
 
-  const tierName = new Map(catRes.rows.map(c => [c.local_id, c.name]));
-  const matrixByCell = new Map();
-  const matrixVolumesByTier = new Map();
-  for (const c of matrixRes.rows) {
-    matrixByCell.set(`${c.category_id}|${num(c.volume_ml)}`, num(c.sell_price));
-    if (!matrixVolumesByTier.has(c.category_id)) matrixVolumesByTier.set(c.category_id, []);
-    matrixVolumesByTier.get(c.category_id).push(num(c.volume_ml));
-  }
-  for (const list of matrixVolumesByTier.values()) list.sort((a, b) => a - b);
+  const rows = raw.map(r => ({
+    sku: r.uuid,                       // product-level key = the local uuid
+    uuid: r.uuid,
+    type: r.product_type,
+    localName: r.name,
+    perfumeName: r.perfume_name || r.name,
+    brand: r.brand || '',
+    category: r.category || '',
+    gender: r.gender || '',
+    imageUrl: r.image_url || '',
+    description: r.description || '',
+    perfumeId: r.perfume_id || null,
+    stockQty: num(r.stock_qty),
+    shopCount: r.shop_count,
+    // Local price: the designated source shop's, else any shop's.
+    localPriceDzd: r.source_price == null ? num(r.any_price) : num(r.source_price),
+    // Online overlay.
+    onlinePriceDzd: r.online_price_dzd == null ? null : num(r.online_price_dzd),
+    prevPriceDzd: r.prev_price_dzd == null ? null : num(r.prev_price_dzd),
+    onlineName: r.online_name || '',
+    status: r.status || 'draft',
+    priceOverridden: !!r.price_overridden,
+    nameOverridden: !!r.name_overridden,
+    shopifyProductId: r.shopify_product_id ? String(r.shopify_product_id) : null,
+    shopifyVariantId: r.shopify_variant_id ? String(r.shopify_variant_id) : null,
+    published: !!r.shopify_product_id,
+  }));
 
-  const decantVolumes = String(brandRes.rows[0]?.decant_volumes || '')
-    .split(',').map(v => num(v)).filter(v => v > 0).sort((a, b) => a - b);
-
-  const overlay = new Map(overlayRes.rows.map(o => [o.sku, o]));
-
-  const rows = [];
-  const issues = [];
-  for (const r of stockRes.rows) {
-    for (const vol of volumesFor(r, matrixVolumesByTier, decantVolumes)) {
-      const sku = makeSku(r.uuid, isBulk(r.product_type) ? vol : null);
-      if (!sku) continue;
-      const { price: localPrice, issue } = localPriceFor(r, num(vol), matrixByCell);
-      if (issue) issues.push({ sku, name: r.name, issue });
-
-      const o = overlay.get(sku) || null;
-      rows.push({
-        sku,
-        uuid: r.uuid,
-        type: r.product_type,
-        volumeMl: vol == null ? null : num(vol),
-        localName: r.name,
-        brand: r.brand,
-        category: r.category,
-        gender: r.gender || '',
-        tierId: r.price_category_id || null,
-        tierName: tierName.get(r.price_category_id) || '',
-        stockQty: num(r.stock_qty),
-        shopCount: r.shop_count,
-        // The two prices, always both present.
-        localPriceDzd: localPrice,
-        onlinePriceDzd: o?.online_price_dzd == null ? null : num(o.online_price_dzd),
-        prevPriceDzd: o?.prev_price_dzd == null ? null : num(o.prev_price_dzd),
-        onlineName: o?.online_name || '',
-        status: o?.status || 'draft',
-        priceOverridden: !!o?.price_overridden,
-        nameOverridden: !!o?.name_overridden,
-        shopifyProductId: o?.shopify_product_id ? String(o.shopify_product_id) : null,
-        shopifyVariantId: o?.shopify_variant_id ? String(o.shopify_variant_id) : null,
-        published: !!o?.shopify_variant_id,
-        priceIssue: issue,
-      });
-    }
-  }
-
-  // Filters applied after expansion — they act on sellable units, not stock rows.
   const q = String(filters.q || '').trim().toLowerCase();
   const filtered = rows.filter(r => {
     if (filters.type && r.type !== filters.type) return false;
@@ -164,16 +106,85 @@ export async function listOnlineCatalog(brandId, filters = {}) {
     if (filters.status && r.status !== filters.status) return false;
     if (filters.published === 'yes' && !r.published) return false;
     if (filters.published === 'no' && r.published) return false;
-    if (q && !(`${r.localName} ${r.onlineName} ${r.brand} ${r.sku}`.toLowerCase().includes(q))) return false;
+    if (q && !(`${r.localName} ${r.onlineName} ${r.perfumeName} ${r.brand}`.toLowerCase().includes(q))) return false;
     return true;
   });
 
-  return {
-    rows: filtered.slice(0, limit),
-    total: filtered.length,
-    issues: issues.slice(0, 200),
-    decantVolumes,
-  };
+  filtered.sort((a, b) => a.localName.localeCompare(b.localName));
+  return { rows: filtered.slice(0, limit), total: filtered.length };
+}
+
+/**
+ * Everything about one product for the detail view: the full perfume record
+ * (accords/notes/seasons/weather/photos…), per-shop stock and price, and the
+ * price matrix for its tier so staff can see volume pricing without it being
+ * a separate row. One product = a handful of small reads, only on open.
+ */
+export async function getProductDetail(brandId, uuid) {
+  const p = getPool();
+  if (!p) return null;
+  const bid = num(brandId);
+  const u = String(uuid || '').trim();
+  if (!bid || !u) return null;
+
+  try {
+    const [shopsRes, overlayRes] = await Promise.all([
+      p.query(
+        `SELECT pp.shop_id, s.name AS shop_name, s.is_catalog_source,
+                pp.product_type, pp.name, pp.sell_price_dzd, pp.stock_qty,
+                pp.volume_ml, pp.price_category_id, pp.perfume_id, pp.gender
+           FROM pos_products pp JOIN pos_shops s ON s.id = pp.shop_id
+          WHERE s.brand_id = $1 AND pp.uuid = $2
+          ORDER BY s.is_catalog_source DESC, s.name`,
+        [bid, u]),
+      p.query(`SELECT * FROM pos_online_products WHERE brand_id=$1 AND sku=$2`, [bid, u]),
+    ]);
+    if (!shopsRes.rows.length) return null;
+
+    const first = shopsRes.rows[0];
+    let perfume = null;
+    if (first.perfume_id) {
+      const pfRes = await p.query(
+        `SELECT * FROM pos_perfumes WHERE brand_id=$1 AND local_id=$2`, [bid, first.perfume_id]);
+      const pf = pfRes.rows[0];
+      if (pf) perfume = {
+        localId: pf.local_id, name: pf.name, brand: pf.brand, category: pf.category,
+        originalBottle: pf.original_bottle, gender: pf.gender, description: pf.description,
+        rating: pf.rating, imageUrl: pf.image_url,
+        accords: parseJson(pf.accords, []), notes: parseJson(pf.notes, {}),
+        seasons: parseJson(pf.seasons, {}), weather: parseJson(pf.weather, {}),
+        rememberMe: parseJson(pf.remember_me, []), photos: parseJson(pf.photos, []),
+      };
+    }
+
+    // Matrix rows for this product's tier (extrait/shopMade), for the volume
+    // pricing panel — derived, never stored as rows.
+    let matrix = [];
+    const tierId = first.price_category_id;
+    if (tierId) {
+      const mRes = await p.query(
+        `SELECT volume_ml, sell_price FROM pos_price_matrix
+          WHERE brand_id=$1 AND category_id=$2 ORDER BY volume_ml`, [bid, tierId]);
+      matrix = mRes.rows.map(m => ({ volumeMl: num(m.volume_ml), price: num(m.sell_price) }));
+    }
+
+    return {
+      uuid: u,
+      type: first.product_type,
+      localName: first.name,
+      perfume,
+      shops: shopsRes.rows.map(s => ({
+        shopId: s.shop_id, shopName: s.shop_name, isSource: s.is_catalog_source,
+        localPriceDzd: num(s.sell_price_dzd), stockQty: num(s.stock_qty),
+        volumeMl: s.volume_ml == null ? null : num(s.volume_ml),
+      })),
+      overlay: overlayRes.rows[0] || null,
+      matrix,
+    };
+  } catch (err) {
+    console.error('[online-catalog] getProductDetail failed:', err.message);
+    return null;
+  }
 }
 
 /**
