@@ -36,6 +36,8 @@ import {
   setDecantVolumes, listPriceAudit,
 } from './_online-catalog.js';
 import { loadRuleContext, previewRule, applyRule, revertPrices } from './_pricing-rules.js';
+import { listBackups, backupPath, BACKUP_INFO } from './_backup-store.js';
+import fs from 'fs';
 
 export default async function handler(req, res) {
   const secret = process.env.ADMIN_SECRET;
@@ -69,6 +71,15 @@ export default async function handler(req, res) {
           return res.json(await getProductDetail(q.brandId, q.uuid) || {});
         case 'priceAudit':
           return res.json({ rows: await listPriceAudit(q.brandId, q.limit || 50) });
+        case 'backups':
+          return res.json({ rows: listBackups(), info: BACKUP_INFO });
+        case 'backupDownload': {
+          const fp = backupPath(q.shopId, q.day);
+          if (!fp) return res.status(404).json({ error: 'backup not found' });
+          res.setHeader('Content-Type', 'application/gzip');
+          res.setHeader('Content-Disposition', `attachment; filename="shop_${q.shopId}_${q.day}.dump.gz"`);
+          return fs.createReadStream(fp).pipe(res);
+        }
         case 'unrouted':
           return res.json(await listUnrouted());
         case 'analytics':
