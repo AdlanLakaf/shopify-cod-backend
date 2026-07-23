@@ -21,7 +21,6 @@ import adminTiktokMapHandler   from './api/admin-tiktok-map.js';
 import adminShopifyVariantsHandler from './api/admin-shopify-variants.js';
 import posSyncHandler          from './api/pos-sync.js';
 import posImageHandler         from './api/pos-image.js';
-import posBackupHandler        from './api/pos-backup.js';
 import adminPosHandler         from './api/admin-pos.js';
 import { pollTikTokLeads }     from './api/_tiktok.js';
 import { pruneTiktokLeads }    from './api/_tiktok-db.js';
@@ -52,8 +51,9 @@ app.set('trust proxy', 1);
 // Image uploads carry base64 photo bytes — a much larger limit, on their own
 // route. Mounted BEFORE /api/pos so this parser wins for /api/pos/image
 // (express prefix-matches, and body-parser consumes on first match).
+// Shop DB backups do NOT land here — they upload to the landing service,
+// which is where the Railway Volume is mounted (landing/lib/backup-store.ts).
 app.use('/api/pos/image', express.json({ limit: '12mb' }));
-app.use('/api/pos/backup', express.json({ limit: '12mb' }));   // one dump chunk per request
 app.use('/api/pos', express.json({ limit: '2mb' }));
 app.use(express.json({ limit: '16kb', type: ['application/json', 'text/plain'] }));
 
@@ -111,7 +111,6 @@ app.all('/api/tiktok/lead', tiktokLeadHandler);
 // ── POS sync tick — local shop ERPs push stock/sales, pull web orders ────────
 app.post('/api/pos/tick', posSyncHandler);
 app.post('/api/pos/image', posImageHandler);
-app.post('/api/pos/backup', posBackupHandler);
 
 // ── Admin: POS shops/brands/mappings/stock/analytics (ADMIN_SECRET bearer) ───
 app.all('/api/admin/pos', adminPosHandler);
