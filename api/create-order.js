@@ -720,10 +720,14 @@ export default async function handler(req, res) {
 
     // 2) Mirror the order into Postgres for the custom orders admin (/admin/orders).
     {
+      // variantId is carried so the POS side can name a line and compare the
+      // price the customer paid against the local price, even when the variant
+      // has no local mapping yet. Legacy rows without it simply show no name.
       const orderItems = (order.line_items || lineItems).map(it => ({
-        title:    it.title || it.name || 'Item',
-        quantity: it.quantity || 1,
-        priceDzd: Math.round(parseFloat(it.price) || 0),
+        title:     it.title || it.name || 'Item',
+        quantity:  it.quantity || 1,
+        priceDzd:  Math.round(parseFloat(it.price) || 0),
+        variantId: Number(it.variant_id) || null,
       }));
       const totalDzd = Math.round(parseFloat(order.total_price || 0));
       const shipDzd  = Math.round(shippingFloat);
